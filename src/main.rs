@@ -1,10 +1,12 @@
+mod elf;
+
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
+use elf::{ElfClass, Endianness};
 
 #[derive(Default)]
 struct ScanStats {
@@ -12,16 +14,6 @@ struct ScanStats {
     elf_files: u64,
     skipped: u64,
     errors: u64,
-}
-
-fn has_elf_magic(reader: &mut impl Read) -> io::Result<bool> {
-    let mut magic = [0_u8; 4];
-
-    match reader.read_exact(&mut magic) {
-        Ok(()) => Ok(magic == ELF_MAGIC),
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
-        Err(error) => Err(error),
-    }
 }
 
 fn report_error(path: &Path, error: &io::Error, stats: &mut ScanStats) {
@@ -73,14 +65,30 @@ fn scan(root: &Path) -> ScanStats {
 
         stats.files += 1;
 
-        let result = File::open(&path).and_then(|mut file| has_elf_magic(&mut file));
+        let result = File::open(&path).and_then(|mut file| elf::read_ident(&mut file));
 
         match result {
-            Ok(true) => {
+            Ok(Some(ident)) => {
                 stats.elf_files += 1;
+
+                let class = match ident.class {
+                    ElfClass::Elf32 => "ELF32",
+                    ElfClass::Elf64 => "ELF64",
+                };
+
+                let endianness = match ident.endianness {
+                    Endianness::Little => "little-endian",
+                    Endianness::Big => "big-endian",
+                };
+
                 println!("{:?}", path);
+                println!("  Klasa:         {}", class);
+                println!("  Kolejność:     {}", endianness);
+                println!("  Wersja ELF:    {}", ident.version);
+                println!("  OS/ABI:        {}", ident.os_abi);
+                println!("  Wersja ABI:    {}", ident.abi_version);
             }
-            Ok(false) => {}
+            Ok(None) => {}
             Err(error) => report_error(&path, &error, &mut stats),
         }
     }
@@ -104,7 +112,7 @@ fn main() -> ExitCode {
 
     eprintln!();
     eprintln!("Sprawdzone zwykłe pliki: {}", stats.files);
-    eprintln!("Pliki z sygnaturą ELF:   {}", stats.elf_files);
+    eprintln!("Odczytane ident. ELF:    {}", stats.elf_files);
     eprintln!("Pominięte wpisy:         {}", stats.skipped);
     eprintln!("Błędy:                   {}", stats.errors);
 
@@ -112,35 +120,5 @@ fn main() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-
-    #[test]
-    fn detects_elf_magic() {
-        let mut input = Cursor::new(b"\x7fELFadditional bytes");
-        assert!(has_elf_magic(&mut input).unwrap());
-    }
-
-    #[test]
-    fn rejects_other_magic() {
-        let mut input = Cursor::new(b"not an ELF");
-        assert!(!has_elf_magic(&mut input).unwrap());
-    }
-
-    #[test]
-    fn rejects_short_input() {
-        let mut input = Cursor::new(b"\x7fEL");
-        assert!(!has_elf_magic(&mut input).unwrap());
-    }
-
-    #[test]
-    fn rejects_empty_input() {
-        let mut input = Cursor::new(b"");
-        assert!(!has_elf_magic(&mut input).unwrap());
     }
 }
