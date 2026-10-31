@@ -1,4 +1,5 @@
 mod elf;
+mod sections;
 
 use std::env;
 use std::fs::{self, File};
@@ -6,7 +7,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use elf::{ElfClass, Endianness};
+use elf::{ElfClass, ElfFile, Endianness};
+use sections::SectionTable;
 
 #[derive(Default)]
 struct ScanStats {
@@ -19,6 +21,131 @@ struct ScanStats {
 fn report_error(path: &Path, error: &io::Error, stats: &mut ScanStats) {
     stats.errors += 1;
     eprintln!("Błąd dla {:?}: {}", path, error);
+}
+
+fn print_elf(path: &Path, parsed: &ElfFile) {
+    let header = &parsed.header;
+
+    let class = match header.ident.class {
+        ElfClass::Elf32 => "ELF32",
+        ElfClass::Elf64 => "ELF64",
+    };
+
+    let endianness = match header.ident.endianness {
+        Endianness::Little => "little-endian",
+        Endianness::Big => "big-endian",
+    };
+
+    println!("{:?}", path);
+    println!("  Klasa:          {}", class);
+    println!("  Kolejność:      {}", endianness);
+    println!("  OS/ABI:         {}", header.ident.os_abi);
+    println!("  Wersja ABI:     {}", header.ident.abi_version);
+    println!("  Wersja ident.:  {}", header.ident.version);
+    println!("  Wersja ELF:     {}", header.version);
+
+    println!(
+        "  Typ:            {} ({})",
+        elf::file_type_name(header.file_type),
+        header.file_type
+    );
+
+    println!(
+        "  Architektura:   {} ({})",
+        elf::machine_name(header.machine),
+        header.machine
+    );
+
+    println!("  Punkt wejścia:  {:#x}", header.entry);
+    println!("  Flagi:          {:#x}", header.flags);
+    println!("  Rozmiar nagł.:  {} B", header.header_size);
+
+    println!(
+        "  Tabela programu: offset={:#x}, wpis={} B, licznik={}",
+        header.program_header_offset, header.program_header_entry_size, header.program_header_count
+    );
+
+    println!(
+        "  Tabela sekcji:   offset={:#x}, wpis={} B, licznik={}",
+        header.section_header_offset, header.section_header_entry_size, header.section_header_count
+    );
+
+    println!("  Indeks nazw sekcji: {}", header.section_names_index);
+    println!("  Nagłówki programu:");
+
+    if parsed.program_headers.is_empty() {
+        println!("    Brak");
+    }
+
+    for (index, segment) in parsed.program_headers.iter().enumerate() {
+        println!(
+            "    #{:<2} {:<14} type={:#x} {} flags={:#x}",
+            index,
+            elf::segment_type_name(segment.segment_type),
+            segment.segment_type,
+            elf::segment_permissions(segment.flags),
+            segment.flags
+        );
+
+        println!(
+            "        offset={:#x} vaddr={:#x} paddr={:#x}",
+            segment.offset, segment.virtual_address, segment.physical_address
+        );
+
+        println!(
+            "        filesz={:#x} memsz={:#x} align={:#x}",
+            segment.file_size, segment.memory_size, segment.alignment
+        );
+    }
+}
+
+fn print_sections(table: &SectionTable) {
+    println!("  Sekcje:");
+
+    if table.headers.is_empty() {
+        println!("    Brak");
+        return;
+    }
+
+    for (index, section) in table.headers.iter().enumerate() {
+        let name = match table.name(index) {
+            Some(bytes) => format!("{:?}", String::from_utf8_lossy(bytes)),
+            None => "<brak nazwy>".to_string(),
+        };
+
+        println!(
+            "    #{:<2} {} {} ({:#x}) {} flags={:#x}",
+            index,
+            name,
+            sections::section_type_name(section.section_type),
+            section.section_type,
+            sections::section_flags(section.flags),
+            section.flags
+        );
+
+        println!(
+            "        offset={:#x} addr={:#x} size={:#x}",
+            section.offset, section.address, section.size
+        );
+
+        println!(
+            "        link={} info={} align={:#x} entsize={:#x}",
+            section.link, section.info, section.alignment, section.entry_size
+        );
+    }
+}
+
+fn inspect_file(path: &Path) -> io::Result<Option<(ElfFile, SectionTable)>> {
+    let mut file = File::open(path)?;
+
+    let parsed = match elf::read_elf(&mut file)? {
+        Some(parsed) => parsed,
+        None => return Ok(None),
+    };
+
+    let table = sections::read_sections(&mut file, &parsed.header)?;
+
+    Ok(Some((parsed, table)))
 }
 
 fn scan(root: &Path) -> ScanStats {
@@ -65,88 +192,12 @@ fn scan(root: &Path) -> ScanStats {
 
         stats.files += 1;
 
-        let result = File::open(&path).and_then(|mut file| elf::read_elf(&mut file));
-
-        match result {
-            Ok(Some(parsed)) => {
+        match inspect_file(&path) {
+            Ok(Some((parsed, table))) => {
                 stats.elf_files += 1;
-                let header = &parsed.header;
-
-                let class = match header.ident.class {
-                    ElfClass::Elf32 => "ELF32",
-                    ElfClass::Elf64 => "ELF64",
-                };
-
-                let endianness = match header.ident.endianness {
-                    Endianness::Little => "little-endian",
-                    Endianness::Big => "big-endian",
-                };
-
-                println!("{:?}", path);
-                println!("  Klasa:          {}", class);
-                println!("  Kolejność:      {}", endianness);
-                println!("  OS/ABI:         {}", header.ident.os_abi);
-                println!("  Wersja ABI:     {}", header.ident.abi_version);
-                println!("  Wersja ident.:  {}", header.ident.version);
-                println!("  Wersja ELF:     {}", header.version);
-
-                println!(
-                    "  Typ:            {} ({})",
-                    elf::file_type_name(header.file_type),
-                    header.file_type
-                );
-
-                println!(
-                    "  Architektura:   {} ({})",
-                    elf::machine_name(header.machine),
-                    header.machine
-                );
-
-                println!("  Punkt wejścia:  {:#x}", header.entry);
-                println!("  Flagi:          {:#x}", header.flags);
-                println!("  Rozmiar nagł.:  {} B", header.header_size);
-
-                println!(
-                    "  Tabela programu: offset={:#x}, wpis={} B, licznik={}",
-                    header.program_header_offset,
-                    header.program_header_entry_size,
-                    header.program_header_count
-                );
-
-                println!(
-                    "  Tabela sekcji:   offset={:#x}, wpis={} B, licznik={}",
-                    header.section_header_offset,
-                    header.section_header_entry_size,
-                    header.section_header_count
-                );
-
-                println!("  Indeks nazw sekcji: {}", header.section_names_index);
-                println!("  Nagłówki programu:");
-
-                if parsed.program_headers.is_empty() {
-                    println!("    Brak");
-                }
-
-                for (index, segment) in parsed.program_headers.iter().enumerate() {
-                    println!(
-                        "    #{:<2} {:<14} type={:#x} {} flags={:#x}",
-                        index,
-                        elf::segment_type_name(segment.segment_type),
-                        segment.segment_type,
-                        elf::segment_permissions(segment.flags),
-                        segment.flags
-                    );
-
-                    println!(
-                        "        offset={:#x} vaddr={:#x} paddr={:#x}",
-                        segment.offset, segment.virtual_address, segment.physical_address
-                    );
-
-                    println!(
-                        "        filesz={:#x} memsz={:#x} align={:#x}",
-                        segment.file_size, segment.memory_size, segment.alignment
-                    );
-                }
+                print_elf(&path, &parsed);
+                print_sections(&table);
+                println!();
             }
             Ok(None) => {}
             Err(error) => report_error(&path, &error, &mut stats),
