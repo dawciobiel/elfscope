@@ -65,28 +65,61 @@ fn scan(root: &Path) -> ScanStats {
 
         stats.files += 1;
 
-        let result = File::open(&path).and_then(|mut file| elf::read_ident(&mut file));
+        let result = File::open(&path).and_then(|mut file| elf::read_header(&mut file));
 
         match result {
-            Ok(Some(ident)) => {
+            Ok(Some(header)) => {
                 stats.elf_files += 1;
 
-                let class = match ident.class {
+                let class = match header.ident.class {
                     ElfClass::Elf32 => "ELF32",
                     ElfClass::Elf64 => "ELF64",
                 };
 
-                let endianness = match ident.endianness {
+                let endianness = match header.ident.endianness {
                     Endianness::Little => "little-endian",
                     Endianness::Big => "big-endian",
                 };
 
                 println!("{:?}", path);
-                println!("  Klasa:         {}", class);
-                println!("  Kolejność:     {}", endianness);
-                println!("  Wersja ELF:    {}", ident.version);
-                println!("  OS/ABI:        {}", ident.os_abi);
-                println!("  Wersja ABI:    {}", ident.abi_version);
+                println!("  Klasa:          {}", class);
+                println!("  Kolejność:      {}", endianness);
+                println!("  OS/ABI:         {}", header.ident.os_abi);
+                println!("  Wersja ABI:     {}", header.ident.abi_version);
+                println!("  Wersja ident.:  {}", header.ident.version);
+                println!("  Wersja ELF:     {}", header.version);
+
+                println!(
+                    "  Typ:            {} ({})",
+                    elf::file_type_name(header.file_type),
+                    header.file_type
+                );
+
+                println!(
+                    "  Architektura:   {} ({})",
+                    elf::machine_name(header.machine),
+                    header.machine
+                );
+
+                println!("  Punkt wejścia:  {:#x}", header.entry);
+                println!("  Flagi:          {:#x}", header.flags);
+                println!("  Rozmiar nagł.:  {} B", header.header_size);
+
+                println!(
+                    "  Tabela programu: offset={:#x}, wpis={} B, licznik={}",
+                    header.program_header_offset,
+                    header.program_header_entry_size,
+                    header.program_header_count
+                );
+
+                println!(
+                    "  Tabela sekcji:   offset={:#x}, wpis={} B, licznik={}",
+                    header.section_header_offset,
+                    header.section_header_entry_size,
+                    header.section_header_count
+                );
+
+                println!("  Indeks nazw sekcji: {}", header.section_names_index);
             }
             Ok(None) => {}
             Err(error) => report_error(&path, &error, &mut stats),
@@ -112,7 +145,7 @@ fn main() -> ExitCode {
 
     eprintln!();
     eprintln!("Sprawdzone zwykłe pliki: {}", stats.files);
-    eprintln!("Odczytane ident. ELF:    {}", stats.elf_files);
+    eprintln!("Odczytane nagłówki ELF:  {}", stats.elf_files);
     eprintln!("Pominięte wpisy:         {}", stats.skipped);
     eprintln!("Błędy:                   {}", stats.errors);
 
