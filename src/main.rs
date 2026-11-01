@@ -1,3 +1,4 @@
+mod cli;
 mod dynamic;
 mod elf;
 mod interpreter;
@@ -7,9 +8,10 @@ mod sections;
 use std::env;
 use std::fs::{self, File};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 
+use cli::{Action, OutputMode};
 use dynamic::DynamicInfo;
 use elf::{ElfClass, ElfFile, Endianness};
 use sections::SectionTable;
@@ -34,6 +36,13 @@ fn report_error(path: &Path, error: &io::Error, stats: &mut ScanStats) {
     eprintln!("Błąd dla {:?}: {}", path, error);
 }
 
+fn class_name(class: ElfClass) -> &'static str {
+    match class {
+        ElfClass::Elf32 => "ELF32",
+        ElfClass::Elf64 => "ELF64",
+    }
+}
+
 fn section_name(table: &SectionTable, index: usize) -> String {
     match table.name(index) {
         Some(bytes) => format!("{:?}", String::from_utf8_lossy(bytes)),
@@ -44,18 +53,13 @@ fn section_name(table: &SectionTable, index: usize) -> String {
 fn print_elf(path: &Path, parsed: &ElfFile) {
     let header = &parsed.header;
 
-    let class = match header.ident.class {
-        ElfClass::Elf32 => "ELF32",
-        ElfClass::Elf64 => "ELF64",
-    };
-
     let endianness = match header.ident.endianness {
         Endianness::Little => "little-endian",
         Endianness::Big => "big-endian",
     };
 
     println!("{:?}", path);
-    println!("  Klasa:          {}", class);
+    println!("  Klasa:          {}", class_name(header.ident.class));
     println!("  Kolejność:      {}", endianness);
     println!("  OS/ABI:         {}", header.ident.os_abi);
     println!("  Wersja ABI:     {}", header.ident.abi_version);
@@ -239,6 +243,37 @@ fn print_mapping(parsed: &ElfFile, table: &SectionTable) {
     }
 }
 
+fn print_inspection(path: &Path, inspection: &Inspection, mode: OutputMode) {
+    match mode {
+        OutputMode::Summary => {
+            let header = &inspection.elf.header;
+
+            let needed_count = match &inspection.dynamic {
+                Some(info) => info.needed.len(),
+                None => 0,
+            };
+
+            println!(
+                "{:?} | {} | {} | typ={} | sekcje={} | DT_NEEDED={}",
+                path,
+                class_name(header.ident.class),
+                elf::machine_name(header.machine),
+                header.file_type,
+                inspection.sections.headers.len(),
+                needed_count
+            );
+        }
+        OutputMode::Detailed => {
+            print_elf(path, &inspection.elf);
+            print_interpreter(inspection.interpreter.as_deref());
+            print_dynamic(inspection.dynamic.as_ref());
+            print_sections(&inspection.sections);
+            print_mapping(&inspection.elf, &inspection.sections);
+            println!();
+        }
+    }
+}
+
 fn inspect_file(path: &Path) -> io::Result<Option<Inspection>> {
     let mut file = File::open(path)?;
 
@@ -260,7 +295,7 @@ fn inspect_file(path: &Path) -> io::Result<Option<Inspection>> {
     }))
 }
 
-fn scan(root: &Path) -> ScanStats {
+fn scan(root: &Path, mode: OutputMode) -> ScanStats {
     let mut stats = ScanStats::default();
     let mut pending = vec![root.to_path_buf()];
 
@@ -307,14 +342,7 @@ fn scan(root: &Path) -> ScanStats {
         match inspect_file(&path) {
             Ok(Some(inspection)) => {
                 stats.elf_files += 1;
-
-                print_elf(&path, &inspection.elf);
-                print_interpreter(inspection.interpreter.as_deref());
-                print_dynamic(inspection.dynamic.as_ref());
-                print_sections(&inspection.sections);
-                print_mapping(&inspection.elf, &inspection.sections);
-
-                println!();
+                print_inspection(&path, &inspection, mode);
             }
             Ok(None) => {}
             Err(error) => report_error(&path, &error, &mut stats),
@@ -325,18 +353,25 @@ fn scan(root: &Path) -> ScanStats {
 }
 
 fn main() -> ExitCode {
-    let mut args = env::args_os();
-    let program = args.next().unwrap_or_else(|| "elfscope".into());
-
-    let root = match (args.next(), args.next()) {
-        (Some(path), None) => PathBuf::from(path),
-        _ => {
-            eprintln!("Użycie: {:?} <katalog-lub-plik>", program);
+    let action = match cli::parse(env::args_os().skip(1)) {
+        Ok(action) => action,
+        Err(error) => {
+            eprintln!("Błąd argumentów: {}", error);
+            eprintln!();
+            eprintln!("{}", cli::HELP);
             return ExitCode::from(2);
         }
     };
 
-    let stats = scan(&root);
+    let (path, mode) = match action {
+        Action::Help => {
+            print!("{}", cli::HELP);
+            return ExitCode::SUCCESS;
+        }
+        Action::Scan { path, mode } => (path, mode),
+    };
+
+    let stats = scan(&path, mode);
 
     eprintln!();
     eprintln!("Sprawdzone zwykłe pliki: {}", stats.files);
