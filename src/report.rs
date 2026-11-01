@@ -362,6 +362,32 @@ fn print_relocations(inspection: &Inspection) {
                     record.index, record.offset, record.info
                 ),
             }
+
+            match &record.symbol {
+                Some(symbol) if symbol.index == 0 => println!(
+                    "                symbol=#0 <STN_UNDEF> typ_relokacji={}",
+                    symbol.relocation_type
+                ),
+                Some(symbol) => {
+                    let name = if symbol.name.is_empty() {
+                        "<bez nazwy>".to_string()
+                    } else {
+                        format!("{:?}", String::from_utf8_lossy(&symbol.name))
+                    };
+
+                    let suffix = if symbol.name_truncated {
+                        " [nazwa skrócona]"
+                    } else {
+                        ""
+                    };
+
+                    println!(
+                        "                symbol=#{} {}{} typ_relokacji={}",
+                        symbol.index, name, suffix, symbol.relocation_type
+                    );
+                }
+                None => println!("                symbol i typ: niezdekodowane dla tego ABI"),
+            }
         }
     }
 }
