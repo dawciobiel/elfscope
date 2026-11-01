@@ -5,10 +5,13 @@ use crate::elf::{ElfClass, ElfHeader, Endianness};
 const SHT_NULL: u32 = 0;
 const SHT_STRTAB: u32 = 3;
 const SHT_NOBITS: u32 = 8;
-const SHN_LORESERVE: u16 = 0xff00;
 
-// Limit naszego narzędzia, a nie ograniczenie formatu ELF.
+const SHN_LORESERVE: u16 = 0xff00;
+const SHN_XINDEX: u16 = 0xffff;
+
+// Limity naszego narzędzia, nie formatu ELF.
 const MAX_NAME_TABLE_SIZE: u64 = 16 * 1024 * 1024;
+const MAX_SECTION_COUNT: u64 = 262_144;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectionHeader {
@@ -109,6 +112,7 @@ fn validate_range(offset: u64, size: u64, file_size: u64) -> io::Result<()> {
 }
 
 fn validate_section(section: &SectionHeader, file_size: u64) -> io::Result<()> {
+    // Sekcja zerowa może przechowywać metadane rozszerzonej numeracji.
     if section.section_type == SHT_NULL {
         return Ok(());
     }
@@ -130,37 +134,62 @@ fn validate_section(section: &SectionHeader, file_size: u64) -> io::Result<()> {
     Ok(())
 }
 
+fn resolve_numbers(header: &ElfHeader, zero: &SectionHeader) -> io::Result<(u64, u64)> {
+    let count = if header.section_header_count == 0 {
+        if zero.size < u64::from(SHN_LORESERVE) {
+            return Err(invalid_data(
+                "Rozszerzona liczba sekcji jest mniejsza niż SHN_LORESERVE",
+            ));
+        }
+
+        zero.size
+    } else {
+        if header.section_header_count >= SHN_LORESERVE {
+            return Err(invalid_data(
+                "Zarezerwowana wartość e_shnum zamiast rozszerzonej numeracji",
+            ));
+        }
+
+        u64::from(header.section_header_count)
+    };
+
+    let names_index = if header.section_names_index == SHN_XINDEX {
+        if zero.link < u32::from(SHN_LORESERVE) {
+            return Err(invalid_data(
+                "Rozszerzony indeks nazw jest mniejszy niż SHN_LORESERVE",
+            ));
+        }
+
+        u64::from(zero.link)
+    } else {
+        if header.section_names_index >= SHN_LORESERVE {
+            return Err(invalid_data("Zarezerwowana wartość indeksu nazw sekcji"));
+        }
+
+        u64::from(header.section_names_index)
+    };
+
+    if names_index != 0 && names_index >= count {
+        return Err(invalid_data(
+            "Indeks tabeli nazw wykracza poza tabelę sekcji",
+        ));
+    }
+
+    Ok((count, names_index))
+}
+
 pub fn read_sections(
     reader: &mut (impl Read + Seek),
     header: &ElfHeader,
 ) -> io::Result<SectionTable> {
-    let count = header.section_header_count;
-    let names_index = header.section_names_index;
-
     if header.section_header_offset == 0 {
-        if count != 0 || names_index != 0 {
+        if header.section_header_count != 0 || header.section_names_index != 0 {
             return Err(invalid_data(
                 "Brak tabeli sekcji przy niezerowym liczniku lub indeksie nazw",
             ));
         }
 
         return Ok(SectionTable::default());
-    }
-
-    if count == 0 {
-        return Err(unsupported(
-            "Rozszerzona liczba sekcji nie jest jeszcze obsługiwana",
-        ));
-    }
-
-    if count >= SHN_LORESERVE {
-        return Err(invalid_data("Zarezerwowana wartość licznika sekcji"));
-    }
-
-    if names_index >= SHN_LORESERVE {
-        return Err(unsupported(
-            "Rozszerzony lub zarezerwowany indeks nazw sekcji nie jest obsługiwany",
-        ));
     }
 
     let expected_entry_size: u16 = match header.ident.class {
@@ -174,17 +203,46 @@ pub fn read_sections(
 
     let file_size = reader.seek(SeekFrom::End(0))?;
 
-    let table_size = u64::from(count)
-        .checked_mul(u64::from(header.section_header_entry_size))
+    // Najpierw sprawdzamy i odczytujemy tylko nagłówek zerowy.
+    validate_range(
+        header.section_header_offset,
+        u64::from(expected_entry_size),
+        file_size,
+    )?;
+
+    reader.seek(SeekFrom::Start(header.section_header_offset))?;
+
+    let zero = read_section_header(reader, header.ident.class, header.ident.endianness)?;
+
+    if zero.section_type != SHT_NULL {
+        return Err(invalid_data("Zerowy nagłówek sekcji nie ma typu SHT_NULL"));
+    }
+
+    let (count, names_index) = resolve_numbers(header, &zero)?;
+
+    if count > MAX_SECTION_COUNT {
+        return Err(unsupported(
+            "Liczba sekcji przekracza limit narzędzia: 262144",
+        ));
+    }
+
+    let table_size = count
+        .checked_mul(u64::from(expected_entry_size))
         .ok_or_else(|| invalid_data("Przepełnienie rozmiaru tabeli sekcji"))?;
 
     validate_range(header.section_header_offset, table_size, file_size)?;
 
-    reader.seek(SeekFrom::Start(header.section_header_offset))?;
+    let count =
+        usize::try_from(count).map_err(|_| invalid_data("Liczba sekcji nie mieści się w usize"))?;
 
-    let mut headers = Vec::with_capacity(usize::from(count));
+    let names_index = usize::try_from(names_index)
+        .map_err(|_| invalid_data("Indeks tabeli nazw nie mieści się w usize"))?;
 
-    for index in 0..count {
+    let mut headers = Vec::with_capacity(count);
+    headers.push(zero);
+
+    // Czytnik znajduje się już bezpośrednio za nagłówkiem zerowym.
+    for index in 1..count {
         let section = read_section_header(reader, header.ident.class, header.ident.endianness)?;
 
         validate_section(&section, file_size)
@@ -193,11 +251,6 @@ pub fn read_sections(
         headers.push(section);
     }
 
-    if headers[0].section_type != SHT_NULL {
-        return Err(invalid_data("Zerowy nagłówek sekcji nie ma typu SHT_NULL"));
-    }
-
-    // Indeks 0 oznacza brak tabeli nazw sekcji.
     if names_index == 0 {
         return Ok(SectionTable {
             headers,
@@ -205,9 +258,7 @@ pub fn read_sections(
         });
     }
 
-    let names_header = headers
-        .get(usize::from(names_index))
-        .ok_or_else(|| invalid_data("Indeks tabeli nazw wykracza poza tabelę sekcji"))?;
+    let names_header = &headers[names_index];
 
     if names_header.section_type != SHT_STRTAB {
         return Err(invalid_data("Sekcja nazw nie ma typu SHT_STRTAB"));
@@ -306,6 +357,21 @@ mod tests {
         }
     }
 
+    fn null_section() -> SectionHeader {
+        SectionHeader {
+            name_offset: 0,
+            section_type: SHT_NULL,
+            flags: 0,
+            address: 0,
+            offset: 0,
+            size: 0,
+            link: 0,
+            info: 0,
+            alignment: 0,
+            entry_size: 0,
+        }
+    }
+
     fn push(bytes: &mut Vec<u8>, value: u64, width: usize, endian: Endianness) {
         match endian {
             Endianness::Little => {
@@ -366,19 +432,7 @@ mod tests {
     }
 
     fn sample_file() -> Vec<u8> {
-        let null = SectionHeader {
-            name_offset: 0,
-            section_type: 0,
-            flags: 0,
-            address: 0,
-            offset: 0,
-            size: 0,
-            link: 0,
-            info: 0,
-            alignment: 0,
-            entry_size: 0,
-        };
-
+        let null = null_section();
         let names = b"\0.shstrtab\0";
 
         let names_header = SectionHeader {
@@ -453,8 +507,6 @@ mod tests {
     #[test]
     fn rejects_bad_name_offset() {
         let mut bytes = sample_file();
-
-        // sh_name drugiego nagłówka sekcji.
         bytes[128..132].copy_from_slice(&999_u32.to_le_bytes());
 
         assert!(read_sections(&mut Cursor::new(bytes), &sample_header(),).is_err());
@@ -485,5 +537,88 @@ mod tests {
         assert_eq!(section_flags(6), "-AX");
         assert_eq!(section_flags(3), "WA-");
         assert_eq!(section_flags(0), "---");
+    }
+
+    #[test]
+    fn resolves_extended_numbers() {
+        let mut header = sample_header();
+        header.section_header_count = 0;
+        header.section_names_index = SHN_XINDEX;
+
+        let mut zero = null_section();
+        zero.size = u64::from(SHN_LORESERVE) + 1;
+        zero.link = u32::from(SHN_LORESERVE);
+
+        let (count, names_index) = resolve_numbers(&header, &zero).unwrap();
+
+        assert_eq!(count, 65_281);
+        assert_eq!(names_index, 65_280);
+    }
+
+    #[test]
+    fn rejects_reserved_direct_count() {
+        let mut header = sample_header();
+        header.section_header_count = SHN_LORESERVE;
+
+        assert!(resolve_numbers(&header, &null_section()).is_err());
+    }
+
+    #[test]
+    fn rejects_too_small_extended_count() {
+        let mut header = sample_header();
+        header.section_header_count = 0;
+
+        let mut zero = null_section();
+        zero.size = 2;
+
+        assert!(resolve_numbers(&header, &zero).is_err());
+    }
+
+    #[test]
+    fn reads_extended_table_and_names() {
+        let count = usize::from(SHN_LORESERVE) + 1;
+        let names_index = count - 1;
+        let names = b"\0.shstrtab\0";
+        let names_offset = 64 + count * 64;
+
+        let mut header = sample_header();
+        header.section_header_count = 0;
+        header.section_names_index = SHN_XINDEX;
+
+        let mut zero = null_section();
+        zero.size = count as u64;
+        zero.link = names_index as u32;
+
+        let names_header = SectionHeader {
+            name_offset: 1,
+            section_type: SHT_STRTAB,
+            flags: 0,
+            address: 0,
+            offset: names_offset as u64,
+            size: names.len() as u64,
+            link: 0,
+            info: 0,
+            alignment: 1,
+            entry_size: 0,
+        };
+
+        let mut bytes = vec![0_u8; names_offset + names.len()];
+
+        let encoded_zero = encode(&zero, ElfClass::Elf64, Endianness::Little);
+
+        bytes[64..128].copy_from_slice(&encoded_zero);
+
+        let encoded_names = encode(&names_header, ElfClass::Elf64, Endianness::Little);
+
+        let names_header_offset = 64 + names_index * 64;
+
+        bytes[names_header_offset..names_header_offset + 64].copy_from_slice(&encoded_names);
+
+        bytes[names_offset..].copy_from_slice(names);
+
+        let table = read_sections(&mut Cursor::new(bytes), &header).unwrap();
+
+        assert_eq!(table.headers.len(), count);
+        assert_eq!(table.name(names_index), Some(&b".shstrtab"[..]));
     }
 }
