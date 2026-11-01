@@ -10,6 +10,15 @@ const SHT_NOBITS: u32 = 8;
 const SHF_ALLOC: u64 = 0x2;
 const SHF_TLS: u64 = 0x400;
 
+const PF_X: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryLocation {
+    pub segment_index: usize,
+    pub file_offset: Option<u64>,
+    pub executable: bool,
+}
+
 pub fn is_supported_segment(segment: &ProgramHeader) -> bool {
     matches!(segment.segment_type, PT_LOAD | PT_TLS)
 }
@@ -78,6 +87,38 @@ pub fn section_belongs_to_segment(section: &SectionHeader, segment: &ProgramHead
         (memory_delta, file_delta),
         (Some(memory), Some(file)) if memory == file
     )
+}
+
+pub fn entry_locations(entry: u64, segments: &[ProgramHeader]) -> Vec<EntryLocation> {
+    segments
+        .iter()
+        .enumerate()
+        .filter_map(|(segment_index, segment)| {
+            if segment.segment_type != PT_LOAD {
+                return None;
+            }
+
+            let memory_end = segment.virtual_address.checked_add(segment.memory_size)?;
+
+            if entry < segment.virtual_address || entry >= memory_end {
+                return None;
+            }
+
+            let delta = entry.checked_sub(segment.virtual_address)?;
+
+            let file_offset = if delta < segment.file_size {
+                Some(segment.offset.checked_add(delta)?)
+            } else {
+                None
+            };
+
+            Some(EntryLocation {
+                segment_index,
+                file_offset,
+                executable: segment.flags & PF_X != 0,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -200,5 +241,59 @@ mod tests {
         section.size = 0;
 
         assert!(!section_belongs_to_segment(&section, &segment(),));
+    }
+
+    #[test]
+    fn maps_entry_to_file_offset() {
+        let mut segment = segment();
+        segment.flags = 5;
+
+        let locations = entry_locations(0x4040, &[segment]);
+
+        assert_eq!(
+            locations,
+            vec![EntryLocation {
+                segment_index: 0,
+                file_offset: Some(0x1040),
+                executable: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn identifies_entry_in_zero_filled_memory() {
+        let locations = entry_locations(0x4250, &[segment()]);
+
+        assert_eq!(
+            locations,
+            vec![EntryLocation {
+                segment_index: 0,
+                file_offset: None,
+                executable: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn reports_non_executable_entry_segment() {
+        let locations = entry_locations(0x4040, &[segment()]);
+
+        assert_eq!(locations.len(), 1);
+        assert!(!locations[0].executable);
+    }
+
+    #[test]
+    fn excludes_entry_at_memory_end() {
+        assert!(entry_locations(0x4300, &[segment()]).is_empty());
+        assert!(entry_locations(0x3fff, &[segment()]).is_empty());
+    }
+
+    #[test]
+    fn ignores_overflowing_entry_mapping() {
+        let mut segment = segment();
+        segment.virtual_address = u64::MAX - 1;
+        segment.memory_size = 4;
+
+        assert!(entry_locations(u64::MAX, &[segment]).is_empty());
     }
 }

@@ -92,6 +92,59 @@ fn print_elf(path: &Path, parsed: &ElfFile) {
     }
 }
 
+fn print_entry_analysis(parsed: &ElfFile) {
+    let header = &parsed.header;
+
+    println!("  Analiza punktu wejścia:");
+
+    if !matches!(header.file_type, 2 | 3) {
+        println!("    Pominięta dla tego typu pliku");
+        return;
+    }
+
+    if header.entry == 0 {
+        println!("    Nagłówek nie określa punktu wejścia (e_entry=0)");
+        return;
+    }
+
+    let locations = mapping::entry_locations(header.entry, &parsed.program_headers);
+
+    if locations.is_empty() {
+        println!("    Adres nie pasuje do żadnego poprawnego zakresu LOAD");
+        return;
+    }
+
+    if locations.len() > 1 {
+        println!(
+            "    Uwaga: adres pasuje do {} segmentów LOAD",
+            locations.len()
+        );
+    }
+
+    for location in locations {
+        let segment = &parsed.program_headers[location.segment_index];
+
+        println!(
+            "    Segment #{} LOAD {}",
+            location.segment_index,
+            elf::segment_permissions(segment.flags)
+        );
+
+        match location.file_offset {
+            Some(offset) => {
+                println!("    Offset w pliku: {:#x}", offset);
+            }
+            None => {
+                println!("    Część zerowana segmentu — brak odpowiadających bajtów w pliku");
+            }
+        }
+
+        if !location.executable {
+            println!("    Uwaga: segment nie ma flagi wykonywania PF_X");
+        }
+    }
+}
+
 fn print_interpreter(path: Option<&[u8]>) {
     match path {
         Some(bytes) => {
@@ -236,6 +289,7 @@ pub(crate) fn print_inspection(path: &Path, inspection: &Inspection, mode: Outpu
         }
         OutputMode::Detailed => {
             print_elf(path, &inspection.elf);
+            print_entry_analysis(&inspection.elf);
             print_interpreter(inspection.interpreter.as_deref());
             print_dynamic(inspection.dynamic.as_ref());
             print_sections(&inspection.sections);
