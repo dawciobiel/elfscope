@@ -1,13 +1,11 @@
 mod relocation_types;
-
-use std::path::Path;
-
 use crate::cli::OutputMode;
 use crate::dynamic::DynamicInfo;
 use crate::elf::{self, ElfClass, ElfFile, Endianness};
 use crate::inspection::Inspection;
 use crate::mapping;
 use crate::sections::{self, SectionTable};
+use std::path::Path;
 
 fn class_name(class: ElfClass) -> &'static str {
     match class {
@@ -15,28 +13,25 @@ fn class_name(class: ElfClass) -> &'static str {
         ElfClass::Elf64 => "ELF64",
     }
 }
-
 fn section_name(table: &SectionTable, index: usize) -> String {
     match table.name(index) {
         Some(bytes) => format!("{:?}", String::from_utf8_lossy(bytes)),
         None => "<brak nazwy>".to_string(),
     }
 }
-
 fn relocation_type_label(inspection: &Inspection, kind: u32) -> String {
     let header = &inspection.elf.header;
     relocation_types::label(header.ident.class, header.machine, kind)
 }
-
 fn print_elf(path: &Path, parsed: &ElfFile) {
     let header = &parsed.header;
-    let endianness = match header.ident.endianness {
+    let endian = match header.ident.endianness {
         Endianness::Little => "little-endian",
         Endianness::Big => "big-endian",
     };
     println!("{:?}", path);
     println!("  Klasa:          {}", class_name(header.ident.class));
-    println!("  Kolejność:      {}", endianness);
+    println!("  Kolejność:      {}", endian);
     println!("  OS/ABI:         {}", header.ident.os_abi);
     println!("  Wersja ABI:     {}", header.ident.abi_version);
     println!("  Wersja ident.:  {}", header.ident.version);
@@ -86,7 +81,6 @@ fn print_elf(path: &Path, parsed: &ElfFile) {
         );
     }
 }
-
 fn print_entry_analysis(parsed: &ElfFile) {
     let header = &parsed.header;
     println!("  Analiza punktu wejścia:");
@@ -125,21 +119,18 @@ fn print_entry_analysis(parsed: &ElfFile) {
         }
     }
 }
-
 fn print_interpreter(path: Option<&[u8]>) {
     match path {
         Some(bytes) => println!("  Interpreter ELF: {:?}", String::from_utf8_lossy(bytes)),
         None => println!("  Interpreter ELF: brak wpisu PT_INTERP"),
     }
 }
-
 fn print_optional_dynamic_string(label: &str, value: Option<&[u8]>) {
     match value {
         Some(bytes) => println!("    {}: {:?}", label, String::from_utf8_lossy(bytes)),
         None => println!("    {}: brak wpisu", label),
     }
 }
-
 fn print_dynamic(info: Option<&DynamicInfo>) {
     println!("  Informacje dynamiczne:");
     let Some(info) = info else {
@@ -157,17 +148,18 @@ fn print_dynamic(info: Option<&DynamicInfo>) {
         println!("    {:?}", String::from_utf8_lossy(name));
     }
 }
-
 fn print_build_ids(inspection: &Inspection) {
     if inspection.build_ids.is_empty() {
-        println!("  GNU Build ID: nie znaleziono w sekcji .note.gnu.build-id");
+        println!(
+            "  GNU Build ID: nie znaleziono w sekcji .note.gnu.build-id ani w segmentach PT_NOTE"
+        );
         return;
     }
     for id in &inspection.build_ids {
-        println!("  GNU Build ID: {} (sekcja #{})", id, id.section_index);
+        let sources: Vec<String> = id.sources.iter().map(ToString::to_string).collect();
+        println!("  GNU Build ID: {} ({})", id, sources.join(", "));
     }
 }
-
 fn print_sections(table: &SectionTable) {
     println!("  Sekcje:");
     if table.headers.is_empty() {
@@ -194,20 +186,19 @@ fn print_sections(table: &SectionTable) {
         );
     }
 }
-
 fn print_mapping(parsed: &ElfFile, table: &SectionTable) {
     println!("  Sekcje w LOAD i TLS (tylko niepuste, z flagą ALLOC):");
     if table.headers.is_empty() {
         println!("    Brak tabeli sekcji — nie można wyznaczyć mapowania");
         return;
     }
-    let mut supported_count = 0;
-    for (segment_index, segment) in parsed.program_headers.iter().enumerate() {
+    let mut count = 0;
+    for (index, segment) in parsed.program_headers.iter().enumerate() {
         if !mapping::is_supported_segment(segment) {
             continue;
         }
-        supported_count += 1;
-        let matching_sections: Vec<String> = table
+        count += 1;
+        let matches: Vec<String> = table
             .headers
             .iter()
             .enumerate()
@@ -216,21 +207,20 @@ fn print_mapping(parsed: &ElfFile, table: &SectionTable) {
             .collect();
         println!(
             "    Segment #{} {} {}:",
-            segment_index,
+            index,
             elf::segment_type_name(segment.segment_type),
             elf::segment_permissions(segment.flags)
         );
-        if matching_sections.is_empty() {
+        if matches.is_empty() {
             println!("        Brak pasujących sekcji");
         } else {
-            println!("        {}", matching_sections.join(", "));
+            println!("        {}", matches.join(", "));
         }
     }
-    if supported_count == 0 {
+    if count == 0 {
         println!("    Brak wpisów LOAD i TLS");
     }
 }
-
 fn print_symbols(inspection: &Inspection) {
     println!("  Tablice symboli:");
     if inspection.symbols.is_empty() {
@@ -281,7 +271,6 @@ fn print_symbols(inspection: &Inspection) {
         }
     }
 }
-
 fn print_relocations(inspection: &Inspection) {
     println!("  Tablice relokacji:");
     if inspection.relocations.is_empty() {
@@ -351,12 +340,11 @@ fn print_relocations(inspection: &Inspection) {
         }
     }
 }
-
 pub(crate) fn print_inspection(path: &Path, inspection: &Inspection, mode: OutputMode) {
     match mode {
         OutputMode::Summary => {
             let header = &inspection.elf.header;
-            let needed_count = match &inspection.dynamic {
+            let needed = match &inspection.dynamic {
                 Some(info) => info.needed.len(),
                 None => 0,
             };
@@ -367,7 +355,7 @@ pub(crate) fn print_inspection(path: &Path, inspection: &Inspection, mode: Outpu
                 elf::machine_name(header.machine),
                 header.file_type,
                 inspection.sections.headers.len(),
-                needed_count
+                needed
             );
         }
         OutputMode::Detailed => {

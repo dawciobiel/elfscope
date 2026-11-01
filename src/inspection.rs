@@ -1,7 +1,3 @@
-use std::fs::File;
-use std::io;
-use std::path::Path;
-
 use crate::build_id::{self, BuildId};
 use crate::dynamic::{self, DynamicInfo};
 use crate::elf::{self, ElfFile};
@@ -9,6 +5,9 @@ use crate::interpreter;
 use crate::relocations::{self, RelocationTableSummary};
 use crate::sections::{self, SectionTable};
 use crate::symbols::{self, SymbolTableSummary};
+use std::fs::File;
+use std::io;
+use std::path::Path;
 
 pub(crate) struct Inspection {
     pub(crate) elf: ElfFile,
@@ -32,8 +31,12 @@ pub(crate) fn inspect_file(path: &Path) -> io::Result<Option<Inspection>> {
     let symbols = symbols::read_symbol_summaries(&mut file, &parsed.header, &sections.headers)?;
     let relocations =
         relocations::read_relocation_summaries(&mut file, &parsed.header, &sections.headers)?;
-    let build_ids = build_id::read_build_ids(&mut file, &parsed.header, &sections)?;
-
+    let build_ids = build_id::read_build_ids(
+        &mut file,
+        &parsed.header,
+        &sections,
+        &parsed.program_headers,
+    )?;
     Ok(Some(Inspection {
         elf: parsed,
         sections,
