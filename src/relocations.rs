@@ -8,6 +8,9 @@ const SHT_RELA: u32 = 4;
 const SHT_REL: u32 = 9;
 const SHT_DYNSYM: u32 = 11;
 
+const EM_386: u16 = 3;
+const EM_X86_64: u16 = 62;
+
 const MAX_RELOCATION_COUNT: u64 = 1_000_000;
 const MAX_RELOCATION_TABLES: usize = 128;
 const MAX_PREVIEW_RECORDS: usize = 10;
@@ -101,6 +104,33 @@ fn read_record(
     })
 }
 
+fn relocation_symbol_index(info: u64, header: &ElfHeader) -> Option<u64> {
+    match (header.ident.class, header.machine) {
+        (ElfClass::Elf32, EM_386) => Some(info >> 8),
+        (ElfClass::Elf64, EM_X86_64) => Some(info >> 32),
+        _ => None,
+    }
+}
+
+fn linked_symbol_count(symbols: &SectionHeader, class: ElfClass) -> io::Result<u64> {
+    let expected_size = match class {
+        ElfClass::Elf32 => 16,
+        ElfClass::Elf64 => 24,
+    };
+
+    if symbols.entry_size != expected_size {
+        return Err(invalid_data(
+            "Powiązana tablica symboli ma nieprawidłowy rozmiar rekordu",
+        ));
+    }
+
+    if symbols.size % expected_size != 0 {
+        return Err(invalid_data("Powiązana tablica symboli ma niepełny rekord"));
+    }
+
+    Ok(symbols.size / expected_size)
+}
+
 pub fn read_relocation_summaries(
     reader: &mut (impl Read + Seek),
     header: &ElfHeader,
@@ -169,6 +199,8 @@ pub fn read_relocation_summaries(
             ));
         }
 
+        let symbol_count = linked_symbol_count(symbols, header.ident.class)?;
+
         let target_section_index = if section.info == 0 {
             if header.file_type == 1 {
                 return Err(invalid_data(
@@ -194,6 +226,15 @@ pub fn read_relocation_summaries(
 
         for index in 0..count {
             let record = read_record(&mut reader, header, with_addend, index)?;
+
+            if let Some(symbol_index) = relocation_symbol_index(record.info, header) {
+                if symbol_index >= symbol_count {
+                    return Err(invalid_data(&format!(
+                        "Sekcja #{}, relokacja #{}: indeks symbolu {} poza tablicą #{} (liczba wpisów: {})",
+                        section_index, index, symbol_index, symbol_table_index, symbol_count
+                    )));
+                }
+            }
 
             if preview.len() < MAX_PREVIEW_RECORDS {
                 preview.push(record);
@@ -229,7 +270,10 @@ mod tests {
                 abi_version: 0,
             },
             file_type: 3,
-            machine: 0,
+            machine: match class {
+                ElfClass::Elf32 => EM_386,
+                ElfClass::Elf64 => EM_X86_64,
+            },
             version: 1,
             entry: 0,
             program_header_offset: 0,
@@ -263,6 +307,13 @@ mod tests {
         }
     }
 
+    fn encoded_info(class: ElfClass, symbol: u64, kind: u64) -> u64 {
+        match class {
+            ElfClass::Elf32 => (symbol << 8) | kind,
+            ElfClass::Elf64 => (symbol << 32) | kind,
+        }
+    }
+
     fn fixture(
         class: ElfClass,
         endian: Endianness,
@@ -272,7 +323,7 @@ mod tests {
         let mut bytes = Vec::new();
 
         push(&mut bytes, 0x1234, class, endian);
-        push(&mut bytes, 0x5678, class, endian);
+        push(&mut bytes, encoded_info(class, 1, 2), class, endian);
 
         if with_addend {
             push(&mut bytes, (-7_i64) as u64, class, endian);
@@ -299,15 +350,19 @@ mod tests {
         let symbols = SectionHeader {
             section_type: SHT_SYMTAB,
             offset: size,
-            size: symbol_size,
+            size: 2 * symbol_size,
             link: 0,
             entry_size: symbol_size,
             ..relocation.clone()
         };
 
-        bytes.resize((size + symbol_size) as usize, 0);
+        bytes.resize((size + 2 * symbol_size) as usize, 0);
 
         (bytes, vec![relocation, symbols])
+    }
+
+    fn replace_info(bytes: &mut [u8], info: u64) {
+        bytes[8..16].copy_from_slice(&info.to_le_bytes());
     }
 
     fn read_default(
@@ -339,7 +394,8 @@ mod tests {
                     assert_eq!(result[0].total, 1);
                     assert_eq!(result[0].symbol_table_index, 1);
                     assert_eq!(result[0].preview[0].offset, 0x1234);
-                    assert_eq!(result[0].preview[0].info, 0x5678);
+
+                    assert_eq!(result[0].preview[0].info, encoded_info(class, 1, 2));
 
                     assert_eq!(
                         result[0].preview[0].addend,
@@ -413,5 +469,53 @@ mod tests {
         sections[0].section_type = 1;
 
         assert!(read_default(bytes, &sections).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_symbol_index_at_table_end() {
+        let (mut bytes, sections) = fixture(ElfClass::Elf64, Endianness::Little, true);
+
+        replace_info(&mut bytes, encoded_info(ElfClass::Elf64, 2, 2));
+
+        let error = read_default(bytes, &sections).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("indeks symbolu 2 poza tablicą"));
+    }
+
+    #[test]
+    fn accepts_zero_symbol_index() {
+        let (mut bytes, sections) = fixture(ElfClass::Elf64, Endianness::Little, true);
+
+        replace_info(&mut bytes, encoded_info(ElfClass::Elf64, 0, 8));
+
+        assert!(read_default(bytes, &sections).is_ok());
+    }
+
+    #[test]
+    fn preserves_raw_info_for_other_architectures() {
+        let (mut bytes, sections) = fixture(ElfClass::Elf64, Endianness::Little, true);
+
+        let info = encoded_info(ElfClass::Elf64, 999, 2);
+        replace_info(&mut bytes, info);
+
+        let mut header = header(ElfClass::Elf64, Endianness::Little);
+        header.machine = 183;
+
+        assert_eq!(relocation_symbol_index(info, &header), None);
+
+        let result =
+            read_relocation_summaries(&mut Cursor::new(bytes), &header, &sections).unwrap();
+
+        assert_eq!(result[0].preview[0].info, info);
+    }
+
+    #[test]
+    fn rejects_invalid_linked_symbol_record_size() {
+        let (bytes, mut sections) = fixture(ElfClass::Elf64, Endianness::Little, true);
+
+        sections[1].entry_size = 16;
+
+        assert!(read_default(bytes, &sections).is_err());
     }
 }
