@@ -1,3 +1,4 @@
+mod dynamic;
 mod elf;
 mod interpreter;
 mod mapping;
@@ -9,6 +10,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use dynamic::DynamicInfo;
 use elf::{ElfClass, ElfFile, Endianness};
 use sections::SectionTable;
 
@@ -24,6 +26,7 @@ struct Inspection {
     elf: ElfFile,
     sections: SectionTable,
     interpreter: Option<Vec<u8>>,
+    dynamic: Option<DynamicInfo>,
 }
 
 fn report_error(path: &Path, error: &io::Error, stats: &mut ScanStats) {
@@ -125,6 +128,24 @@ fn print_interpreter(path: Option<&[u8]>) {
     }
 }
 
+fn print_dynamic(info: Option<&DynamicInfo>) {
+    println!("  Biblioteki DT_NEEDED:");
+
+    match info {
+        None => {
+            println!("    Brak wpisu PT_DYNAMIC");
+        }
+        Some(info) if info.needed.is_empty() => {
+            println!("    Brak wpisów DT_NEEDED");
+        }
+        Some(info) => {
+            for name in &info.needed {
+                println!("    {:?}", String::from_utf8_lossy(name));
+            }
+        }
+    }
+}
+
 fn print_sections(table: &SectionTable) {
     println!("  Sekcje:");
 
@@ -212,12 +233,15 @@ fn inspect_file(path: &Path) -> io::Result<Option<Inspection>> {
 
     let interpreter = interpreter::read_interpreter(&mut file, &parsed.program_headers)?;
 
+    let dynamic = dynamic::read_dynamic(&mut file, &parsed)?;
+
     let sections = sections::read_sections(&mut file, &parsed.header)?;
 
     Ok(Some(Inspection {
         elf: parsed,
         sections,
         interpreter,
+        dynamic,
     }))
 }
 
@@ -271,6 +295,7 @@ fn scan(root: &Path) -> ScanStats {
 
                 print_elf(&path, &inspection.elf);
                 print_interpreter(inspection.interpreter.as_deref());
+                print_dynamic(inspection.dynamic.as_ref());
                 print_sections(&inspection.sections);
                 print_mapping(&inspection.elf, &inspection.sections);
 
