@@ -1,3 +1,5 @@
+mod relocation_types;
+
 use std::path::Path;
 
 use crate::cli::OutputMode;
@@ -19,6 +21,12 @@ fn section_name(table: &SectionTable, index: usize) -> String {
         Some(bytes) => format!("{:?}", String::from_utf8_lossy(bytes)),
         None => "<brak nazwy>".to_string(),
     }
+}
+
+fn relocation_type_label(inspection: &Inspection, kind: u32) -> String {
+    let header = &inspection.elf.header;
+
+    relocation_types::label(header.ident.class, header.machine, kind)
 }
 
 fn print_elf(path: &Path, parsed: &ElfFile) {
@@ -366,7 +374,7 @@ fn print_relocations(inspection: &Inspection) {
             match &record.symbol {
                 Some(symbol) if symbol.index == 0 => println!(
                     "                symbol=#0 <STN_UNDEF> typ_relokacji={}",
-                    symbol.relocation_type
+                    relocation_type_label(inspection, symbol.relocation_type)
                 ),
                 Some(symbol) => {
                     let name = if symbol.name.is_empty() {
@@ -383,7 +391,10 @@ fn print_relocations(inspection: &Inspection) {
 
                     println!(
                         "                symbol=#{} {}{} typ_relokacji={}",
-                        symbol.index, name, suffix, symbol.relocation_type
+                        symbol.index,
+                        name,
+                        suffix,
+                        relocation_type_label(inspection, symbol.relocation_type)
                     );
                 }
                 None => println!("                symbol i typ: niezdekodowane dla tego ABI"),
