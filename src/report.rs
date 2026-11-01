@@ -94,7 +94,6 @@ fn print_elf(path: &Path, parsed: &ElfFile) {
 
 fn print_entry_analysis(parsed: &ElfFile) {
     let header = &parsed.header;
-
     println!("  Analiza punktu wejścia:");
 
     if !matches!(header.file_type, 2 | 3) {
@@ -131,12 +130,8 @@ fn print_entry_analysis(parsed: &ElfFile) {
         );
 
         match location.file_offset {
-            Some(offset) => {
-                println!("    Offset w pliku: {:#x}", offset);
-            }
-            None => {
-                println!("    Część zerowana segmentu — brak odpowiadających bajtów w pliku");
-            }
+            Some(offset) => println!("    Offset w pliku: {:#x}", offset),
+            None => println!("    Część zerowana segmentu — brak odpowiadających bajtów w pliku"),
         }
 
         if !location.executable {
@@ -147,23 +142,15 @@ fn print_entry_analysis(parsed: &ElfFile) {
 
 fn print_interpreter(path: Option<&[u8]>) {
     match path {
-        Some(bytes) => {
-            println!("  Interpreter ELF: {:?}", String::from_utf8_lossy(bytes));
-        }
-        None => {
-            println!("  Interpreter ELF: brak wpisu PT_INTERP");
-        }
+        Some(bytes) => println!("  Interpreter ELF: {:?}", String::from_utf8_lossy(bytes)),
+        None => println!("  Interpreter ELF: brak wpisu PT_INTERP"),
     }
 }
 
 fn print_optional_dynamic_string(label: &str, value: Option<&[u8]>) {
     match value {
-        Some(bytes) => {
-            println!("    {}: {:?}", label, String::from_utf8_lossy(bytes));
-        }
-        None => {
-            println!("    {}: brak wpisu", label);
-        }
+        Some(bytes) => println!("    {}: {:?}", label, String::from_utf8_lossy(bytes)),
+        None => println!("    {}: brak wpisu", label),
     }
 }
 
@@ -328,6 +315,57 @@ fn print_symbols(inspection: &Inspection) {
     }
 }
 
+fn print_relocations(inspection: &Inspection) {
+    println!("  Tablice relokacji:");
+
+    if inspection.relocations.is_empty() {
+        println!("    Brak sekcji REL i RELA");
+        return;
+    }
+
+    for table in &inspection.relocations {
+        let kind = if table.with_addend { "RELA" } else { "REL" };
+
+        println!(
+            "    Sekcja #{} {}: {} wpisy={}",
+            table.section_index,
+            section_name(&inspection.sections, table.section_index),
+            kind,
+            table.total
+        );
+
+        println!(
+            "        Tablica symboli: #{} {}",
+            table.symbol_table_index,
+            section_name(&inspection.sections, table.symbol_table_index)
+        );
+
+        match table.target_section_index {
+            Some(index) => println!(
+                "        Sekcja docelowa: #{} {}",
+                index,
+                section_name(&inspection.sections, index)
+            ),
+            None => println!("        Sekcja docelowa: brak wskazania w sh_info"),
+        }
+
+        println!("        Podgląd rekordów, maksymalnie 10:");
+
+        for record in &table.preview {
+            match record.addend {
+                Some(addend) => println!(
+                    "            #{} r_offset={:#x} r_info={:#x} r_addend={}",
+                    record.index, record.offset, record.info, addend
+                ),
+                None => println!(
+                    "            #{} r_offset={:#x} r_info={:#x} r_addend=<niejawny>",
+                    record.index, record.offset, record.info
+                ),
+            }
+        }
+    }
+}
+
 pub(crate) fn print_inspection(path: &Path, inspection: &Inspection, mode: OutputMode) {
     match mode {
         OutputMode::Summary => {
@@ -356,6 +394,7 @@ pub(crate) fn print_inspection(path: &Path, inspection: &Inspection, mode: Outpu
             print_sections(&inspection.sections);
             print_mapping(&inspection.elf, &inspection.sections);
             print_symbols(inspection);
+            print_relocations(inspection);
             println!();
         }
     }

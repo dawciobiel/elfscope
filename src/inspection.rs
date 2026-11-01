@@ -5,6 +5,7 @@ use std::path::Path;
 use crate::dynamic::{self, DynamicInfo};
 use crate::elf::{self, ElfFile};
 use crate::interpreter;
+use crate::relocations::{self, RelocationTableSummary};
 use crate::sections::{self, SectionTable};
 use crate::symbols::{self, SymbolTableSummary};
 
@@ -14,6 +15,7 @@ pub(crate) struct Inspection {
     pub(crate) interpreter: Option<Vec<u8>>,
     pub(crate) dynamic: Option<DynamicInfo>,
     pub(crate) symbols: Vec<SymbolTableSummary>,
+    pub(crate) relocations: Vec<RelocationTableSummary>,
 }
 
 pub(crate) fn inspect_file(path: &Path) -> io::Result<Option<Inspection>> {
@@ -31,11 +33,15 @@ pub(crate) fn inspect_file(path: &Path) -> io::Result<Option<Inspection>> {
 
     let symbols = symbols::read_symbol_summaries(&mut file, &parsed.header, &sections.headers)?;
 
+    let relocations =
+        relocations::read_relocation_summaries(&mut file, &parsed.header, &sections.headers)?;
+
     Ok(Some(Inspection {
         elf: parsed,
         sections,
         interpreter,
         dynamic,
         symbols,
+        relocations,
     }))
 }

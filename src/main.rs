@@ -4,6 +4,7 @@ mod elf;
 mod inspection;
 mod interpreter;
 mod mapping;
+mod relocations;
 mod report;
 mod sections;
 mod symbols;
