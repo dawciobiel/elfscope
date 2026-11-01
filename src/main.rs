@@ -1,4 +1,5 @@
 mod elf;
+mod mapping;
 mod sections;
 
 use std::env;
@@ -21,6 +22,13 @@ struct ScanStats {
 fn report_error(path: &Path, error: &io::Error, stats: &mut ScanStats) {
     stats.errors += 1;
     eprintln!("Błąd dla {:?}: {}", path, error);
+}
+
+fn section_name(table: &SectionTable, index: usize) -> String {
+    match table.name(index) {
+        Some(bytes) => format!("{:?}", String::from_utf8_lossy(bytes)),
+        None => "<brak nazwy>".to_string(),
+    }
 }
 
 fn print_elf(path: &Path, parsed: &ElfFile) {
@@ -108,15 +116,10 @@ fn print_sections(table: &SectionTable) {
     }
 
     for (index, section) in table.headers.iter().enumerate() {
-        let name = match table.name(index) {
-            Some(bytes) => format!("{:?}", String::from_utf8_lossy(bytes)),
-            None => "<brak nazwy>".to_string(),
-        };
-
         println!(
             "    #{:<2} {} {} ({:#x}) {} flags={:#x}",
             index,
-            name,
+            section_name(table, index),
             sections::section_type_name(section.section_type),
             section.section_type,
             sections::section_flags(section.flags),
@@ -132,6 +135,52 @@ fn print_sections(table: &SectionTable) {
             "        link={} info={} align={:#x} entsize={:#x}",
             section.link, section.info, section.alignment, section.entry_size
         );
+    }
+}
+
+fn print_mapping(parsed: &ElfFile, table: &SectionTable) {
+    println!("  Sekcje w LOAD i TLS (tylko niepuste, z flagą ALLOC):");
+
+    if table.headers.is_empty() {
+        println!("    Brak tabeli sekcji — nie można wyznaczyć mapowania");
+        return;
+    }
+
+    let mut supported_count = 0;
+
+    for (segment_index, segment) in parsed.program_headers.iter().enumerate() {
+        if !mapping::is_supported_segment(segment) {
+            continue;
+        }
+
+        supported_count += 1;
+
+        let matching_sections: Vec<String> = table
+            .headers
+            .iter()
+            .enumerate()
+            .filter(|(_, section)| mapping::section_belongs_to_segment(section, segment))
+            .map(|(section_index, _)| {
+                format!("#{} {}", section_index, section_name(table, section_index))
+            })
+            .collect();
+
+        println!(
+            "    Segment #{} {} {}:",
+            segment_index,
+            elf::segment_type_name(segment.segment_type),
+            elf::segment_permissions(segment.flags)
+        );
+
+        if matching_sections.is_empty() {
+            println!("        Brak pasujących sekcji");
+        } else {
+            println!("        {}", matching_sections.join(", "));
+        }
+    }
+
+    if supported_count == 0 {
+        println!("    Brak wpisów LOAD i TLS");
     }
 }
 
@@ -197,6 +246,7 @@ fn scan(root: &Path) -> ScanStats {
                 stats.elf_files += 1;
                 print_elf(&path, &parsed);
                 print_sections(&table);
+                print_mapping(&parsed, &table);
                 println!();
             }
             Ok(None) => {}
