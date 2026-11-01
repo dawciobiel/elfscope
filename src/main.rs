@@ -128,21 +128,37 @@ fn print_interpreter(path: Option<&[u8]>) {
     }
 }
 
+fn print_optional_dynamic_string(label: &str, value: Option<&[u8]>) {
+    match value {
+        Some(bytes) => {
+            println!("    {}: {:?}", label, String::from_utf8_lossy(bytes));
+        }
+        None => {
+            println!("    {}: brak wpisu", label);
+        }
+    }
+}
+
 fn print_dynamic(info: Option<&DynamicInfo>) {
+    println!("  Informacje dynamiczne:");
+
+    let Some(info) = info else {
+        println!("    Brak wpisu PT_DYNAMIC");
+        return;
+    };
+
+    print_optional_dynamic_string("SONAME", info.soname.as_deref());
+    print_optional_dynamic_string("RPATH", info.rpath.as_deref());
+    print_optional_dynamic_string("RUNPATH", info.runpath.as_deref());
+
     println!("  Biblioteki DT_NEEDED:");
 
-    match info {
-        None => {
-            println!("    Brak wpisu PT_DYNAMIC");
-        }
-        Some(info) if info.needed.is_empty() => {
-            println!("    Brak wpisów DT_NEEDED");
-        }
-        Some(info) => {
-            for name in &info.needed {
-                println!("    {:?}", String::from_utf8_lossy(name));
-            }
-        }
+    if info.needed.is_empty() {
+        println!("    Brak wpisów DT_NEEDED");
+    }
+
+    for name in &info.needed {
+        println!("    {:?}", String::from_utf8_lossy(name));
     }
 }
 
@@ -234,7 +250,6 @@ fn inspect_file(path: &Path) -> io::Result<Option<Inspection>> {
     let interpreter = interpreter::read_interpreter(&mut file, &parsed.program_headers)?;
 
     let dynamic = dynamic::read_dynamic(&mut file, &parsed)?;
-
     let sections = sections::read_sections(&mut file, &parsed.header)?;
 
     Ok(Some(Inspection {
