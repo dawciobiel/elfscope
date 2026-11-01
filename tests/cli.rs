@@ -1,7 +1,9 @@
 #![cfg(target_os = "linux")]
 
+use std::ffi::OsString;
 use std::fs;
 use std::io;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -55,6 +57,13 @@ fn executable() -> &'static Path {
 
 fn run(path: &Path) -> io::Result<Output> {
     Command::new(executable()).arg(path).output()
+}
+
+fn run_summary(path: &Path) -> io::Result<Output> {
+    Command::new(executable())
+        .arg("--summary")
+        .arg(path)
+        .output()
 }
 
 fn assert_success(output: &Output) {
@@ -196,7 +205,6 @@ fn reports_truncated_elf_and_continues_scanning() -> io::Result<()> {
     let directory = TestDirectory::new()?;
 
     fs::write(directory.path().join("broken.elf"), b"\x7fELF")?;
-
     fs::write(directory.path().join("ordinary.txt"), b"ordinary text")?;
 
     let output = run(directory.path())?;
@@ -244,6 +252,122 @@ fn scanning_preserves_input_file_contents() -> io::Result<()> {
         before == after,
         "Zawartość pliku zmieniła się po skanowaniu"
     );
+
+    Ok(())
+}
+
+#[test]
+fn help_exits_successfully_without_scanning() -> io::Result<()> {
+    let output = Command::new(executable()).arg("--help").output()?;
+
+    assert_success(&output);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stdout.contains("Użycie:"));
+    assert!(stdout.contains("--summary"));
+    assert!(stdout.contains("Kody zakończenia:"));
+    assert!(output.stderr.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn summary_prints_one_line_per_elf() -> io::Result<()> {
+    let directory = TestDirectory::new()?;
+
+    fs::copy(executable(), directory.path().join("first.elf"))?;
+    fs::copy(executable(), directory.path().join("second.elf"))?;
+    fs::write(directory.path().join("ordinary.txt"), b"ordinary text")?;
+
+    let output = run_summary(directory.path())?;
+
+    assert_success(&output);
+    assert_eq!(counter(&output, "Sprawdzone zwykłe pliki:"), 3);
+    assert_eq!(counter(&output, "Przeanalizowane ELF:"), 2);
+    assert_eq!(counter(&output, "Błędy:"), 0);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+
+    assert_eq!(lines.len(), 2);
+
+    assert!(stdout.contains("first.elf"));
+    assert!(stdout.contains("second.elf"));
+
+    for line in lines {
+        assert!(line.contains(" | typ="));
+        assert!(line.contains(" | sekcje="));
+        assert!(line.contains(" | DT_NEEDED="));
+    }
+
+    assert!(!stdout.contains("Nagłówki programu:"));
+    assert!(!stdout.contains("  Sekcje:"));
+    assert!(!stdout.contains("Sekcje w LOAD i TLS"));
+
+    Ok(())
+}
+
+#[test]
+fn summary_still_reports_analysis_errors() -> io::Result<()> {
+    let directory = TestDirectory::new()?;
+    let broken = directory.path().join("broken.elf");
+
+    fs::write(&broken, b"\x7fELF")?;
+
+    let output = run_summary(&broken)?;
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(counter(&output, "Sprawdzone zwykłe pliki:"), 1);
+    assert_eq!(counter(&output, "Przeanalizowane ELF:"), 0);
+    assert_eq!(counter(&output, "Błędy:"), 1);
+    assert!(output.stdout.is_empty());
+
+    Ok(())
+}
+
+#[test]
+fn separator_allows_option_like_filename() -> io::Result<()> {
+    let directory = TestDirectory::new()?;
+
+    fs::copy(executable(), directory.path().join("--summary"))?;
+
+    let output = Command::new(executable())
+        .current_dir(directory.path())
+        .args(["--", "--summary"])
+        .output()?;
+
+    assert_success(&output);
+    assert_eq!(counter(&output, "Przeanalizowane ELF:"), 1);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stdout.contains("\"--summary\""));
+    assert!(stdout.contains("Nagłówki programu:"));
+
+    Ok(())
+}
+
+#[test]
+fn scans_non_utf8_filename() -> io::Result<()> {
+    let directory = TestDirectory::new()?;
+
+    let filename = OsString::from_vec(b"sample-\xff.elf".to_vec());
+    let sample = directory.path().join(filename);
+
+    fs::copy(executable(), &sample)?;
+
+    let output = run_summary(&sample)?;
+
+    assert_success(&output);
+    assert_eq!(counter(&output, "Sprawdzone zwykłe pliki:"), 1);
+    assert_eq!(counter(&output, "Przeanalizowane ELF:"), 1);
+    assert_eq!(counter(&output, "Błędy:"), 0);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(stdout.lines().count(), 1);
+    assert!(stdout.contains(" | DT_NEEDED="));
 
     Ok(())
 }
