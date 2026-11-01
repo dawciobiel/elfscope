@@ -1,4 +1,5 @@
 mod elf;
+mod interpreter;
 mod mapping;
 mod sections;
 
@@ -17,6 +18,12 @@ struct ScanStats {
     elf_files: u64,
     skipped: u64,
     errors: u64,
+}
+
+struct Inspection {
+    elf: ElfFile,
+    sections: SectionTable,
+    interpreter: Option<Vec<u8>>,
 }
 
 fn report_error(path: &Path, error: &io::Error, stats: &mut ScanStats) {
@@ -107,6 +114,17 @@ fn print_elf(path: &Path, parsed: &ElfFile) {
     }
 }
 
+fn print_interpreter(path: Option<&[u8]>) {
+    match path {
+        Some(bytes) => {
+            println!("  Interpreter ELF: {:?}", String::from_utf8_lossy(bytes));
+        }
+        None => {
+            println!("  Interpreter ELF: brak wpisu PT_INTERP");
+        }
+    }
+}
+
 fn print_sections(table: &SectionTable) {
     println!("  Sekcje:");
 
@@ -184,7 +202,7 @@ fn print_mapping(parsed: &ElfFile, table: &SectionTable) {
     }
 }
 
-fn inspect_file(path: &Path) -> io::Result<Option<(ElfFile, SectionTable)>> {
+fn inspect_file(path: &Path) -> io::Result<Option<Inspection>> {
     let mut file = File::open(path)?;
 
     let parsed = match elf::read_elf(&mut file)? {
@@ -192,9 +210,15 @@ fn inspect_file(path: &Path) -> io::Result<Option<(ElfFile, SectionTable)>> {
         None => return Ok(None),
     };
 
-    let table = sections::read_sections(&mut file, &parsed.header)?;
+    let interpreter = interpreter::read_interpreter(&mut file, &parsed.program_headers)?;
 
-    Ok(Some((parsed, table)))
+    let sections = sections::read_sections(&mut file, &parsed.header)?;
+
+    Ok(Some(Inspection {
+        elf: parsed,
+        sections,
+        interpreter,
+    }))
 }
 
 fn scan(root: &Path) -> ScanStats {
@@ -242,11 +266,14 @@ fn scan(root: &Path) -> ScanStats {
         stats.files += 1;
 
         match inspect_file(&path) {
-            Ok(Some((parsed, table))) => {
+            Ok(Some(inspection)) => {
                 stats.elf_files += 1;
-                print_elf(&path, &parsed);
-                print_sections(&table);
-                print_mapping(&parsed, &table);
+
+                print_elf(&path, &inspection.elf);
+                print_interpreter(inspection.interpreter.as_deref());
+                print_sections(&inspection.sections);
+                print_mapping(&inspection.elf, &inspection.sections);
+
                 println!();
             }
             Ok(None) => {}
