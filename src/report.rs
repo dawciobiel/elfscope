@@ -33,7 +33,7 @@ fn print_elf(path: &Path, parsed: &ElfFile) {
     println!("  Klasa:          {}", class_name(header.ident.class));
     println!("  Kolejność:      {}", endianness);
     println!("  OS/ABI:         {}", header.ident.os_abi);
-    println!("  Wersja ABI:     {}", header.ident.abi_version);
+    println!("  Wersja ABI:     {}", header.ident.version);
     println!("  Wersja ident.:  {}", header.ident.version);
     println!("  Wersja ELF:     {}", header.version);
 
@@ -294,6 +294,37 @@ fn print_symbols(inspection: &Inspection) {
             "        SHN_UNDEF={}, SHN_XINDEX={}",
             table.undefined, table.extended_indices
         );
+
+        println!("        Podgląd nazwanych wpisów, maksymalnie 20:");
+
+        if table.preview.is_empty() {
+            println!("            Brak nazwanych wpisów");
+        }
+
+        for symbol in &table.preview {
+            let suffix = if symbol.name_truncated {
+                " [nazwa skrócona]"
+            } else {
+                ""
+            };
+
+            println!(
+                "            #{} {:?}{}",
+                symbol.index,
+                String::from_utf8_lossy(&symbol.name),
+                suffix
+            );
+
+            println!(
+                "                value={:#x} size={} bind={} type={} visibility={} shndx={}",
+                symbol.value,
+                symbol.size,
+                symbol.binding,
+                symbol.symbol_type,
+                symbol.visibility,
+                symbol.section_index
+            );
+        }
     }
 }
 
