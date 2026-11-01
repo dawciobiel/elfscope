@@ -1,6 +1,6 @@
 mod header_numbers;
+mod permissions;
 mod relocation_types;
-
 use crate::cli::OutputMode;
 use crate::dynamic::DynamicInfo;
 use crate::elf::{self, ElfClass, ElfFile, Endianness};
@@ -372,6 +372,7 @@ pub(crate) fn print_inspection(path: &Path, inspection: &Inspection, mode: Outpu
         }
         OutputMode::Detailed => {
             print_elf(path, &inspection.elf, &inspection.sections);
+            permissions::print(&inspection.elf.program_headers);
             print_entry_analysis(&inspection.elf);
             print_interpreter(inspection.interpreter.as_deref());
             print_dynamic(inspection.dynamic.as_ref());
