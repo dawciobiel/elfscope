@@ -1,3 +1,4 @@
+mod build_id;
 mod cli;
 mod dynamic;
 mod elf;
@@ -33,7 +34,6 @@ fn report_error(path: &Path, error: &io::Error, stats: &mut ScanStats) {
 fn scan(root: &Path, mode: OutputMode) -> ScanStats {
     let mut stats = ScanStats::default();
     let mut pending = vec![root.to_path_buf()];
-
     while let Some(path) = pending.pop() {
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
@@ -42,12 +42,10 @@ fn scan(root: &Path, mode: OutputMode) -> ScanStats {
                 continue;
             }
         };
-
         if metadata.is_symlink() {
             stats.skipped += 1;
             continue;
         }
-
         if metadata.is_dir() {
             let entries = match fs::read_dir(&path) {
                 Ok(entries) => entries,
@@ -56,24 +54,19 @@ fn scan(root: &Path, mode: OutputMode) -> ScanStats {
                     continue;
                 }
             };
-
             for entry in entries {
                 match entry {
                     Ok(entry) => pending.push(entry.path()),
                     Err(error) => report_error(&path, &error, &mut stats),
                 }
             }
-
             continue;
         }
-
         if !metadata.is_file() {
             stats.skipped += 1;
             continue;
         }
-
         stats.files += 1;
-
         match inspection::inspect_file(&path) {
             Ok(Some(inspection)) => {
                 stats.elf_files += 1;
@@ -83,7 +76,6 @@ fn scan(root: &Path, mode: OutputMode) -> ScanStats {
             Err(error) => report_error(&path, &error, &mut stats),
         }
     }
-
     stats
 }
 
@@ -97,7 +89,6 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-
     let (path, mode) = match action {
         Action::Help => {
             print!("{}", cli::HELP);
@@ -105,15 +96,12 @@ fn main() -> ExitCode {
         }
         Action::Scan { path, mode } => (path, mode),
     };
-
     let stats = scan(&path, mode);
-
     eprintln!();
     eprintln!("Sprawdzone zwykłe pliki: {}", stats.files);
     eprintln!("Przeanalizowane ELF:     {}", stats.elf_files);
     eprintln!("Pominięte wpisy:         {}", stats.skipped);
     eprintln!("Błędy:                   {}", stats.errors);
-
     if stats.errors == 0 {
         ExitCode::SUCCESS
     } else {
