@@ -33,7 +33,7 @@ fn print_elf(path: &Path, parsed: &ElfFile) {
     println!("  Klasa:          {}", class_name(header.ident.class));
     println!("  Kolejność:      {}", endianness);
     println!("  OS/ABI:         {}", header.ident.os_abi);
-    println!("  Wersja ABI:     {}", header.ident.version);
+    println!("  Wersja ABI:     {}", header.ident.abi_version);
     println!("  Wersja ident.:  {}", header.ident.version);
     println!("  Wersja ELF:     {}", header.version);
 
