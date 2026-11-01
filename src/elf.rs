@@ -6,6 +6,8 @@ const PT_NULL: u32 = 0;
 const PT_LOAD: u32 = 1;
 const PN_XNUM: u16 = 0xffff;
 
+const MAX_PROGRAM_HEADER_COUNT: u64 = 262_144;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElfClass {
     Elf32,
@@ -247,7 +249,6 @@ fn validate_file_range(offset: u64, size: u64, file_size: u64) -> io::Result<()>
 }
 
 fn validate_program_header(segment: &ProgramHeader, file_size: u64) -> io::Result<()> {
-    // Pozostałe pola wpisu PT_NULL nie mają określonego znaczenia.
     if segment.segment_type == PT_NULL {
         return Ok(());
     }
@@ -281,21 +282,75 @@ fn validate_program_header(segment: &ProgramHeader, file_size: u64) -> io::Resul
     Ok(())
 }
 
+fn read_extended_program_count(
+    reader: &mut (impl Read + Seek),
+    header: &ElfHeader,
+) -> io::Result<u64> {
+    if header.section_header_offset == 0 {
+        return Err(invalid_data("PN_XNUM wymaga zerowego nagłówka sekcji"));
+    }
+
+    let (section_size, info_offset): (usize, usize) = match header.ident.class {
+        ElfClass::Elf32 => (40, 28),
+        ElfClass::Elf64 => (64, 44),
+    };
+
+    if usize::from(header.section_header_entry_size) != section_size {
+        return Err(invalid_data(
+            "PN_XNUM: nieobsługiwany rozmiar nagłówka sekcji",
+        ));
+    }
+
+    let file_size = reader.seek(SeekFrom::End(0))?;
+
+    validate_file_range(header.section_header_offset, section_size as u64, file_size)?;
+
+    reader.seek(SeekFrom::Start(header.section_header_offset))?;
+
+    let mut bytes = [0_u8; 64];
+    reader.read_exact(&mut bytes[..section_size])?;
+
+    let mut type_bytes = &bytes[4..8];
+    let section_type = read_u32(&mut type_bytes, header.ident.endianness)?;
+
+    if section_type != 0 {
+        return Err(invalid_data(
+            "PN_XNUM: zerowy nagłówek sekcji nie ma typu SHT_NULL",
+        ));
+    }
+
+    let mut info_bytes = &bytes[info_offset..info_offset + 4];
+
+    let count = u64::from(read_u32(&mut info_bytes, header.ident.endianness)?);
+
+    if count < u64::from(PN_XNUM) {
+        return Err(invalid_data(
+            "PN_XNUM: rozszerzona liczba nagłówków jest mniejsza niż 65535",
+        ));
+    }
+
+    Ok(count)
+}
+
 pub fn read_program_headers(
     reader: &mut (impl Read + Seek),
     header: &ElfHeader,
 ) -> io::Result<Vec<ProgramHeader>> {
-    let count = header.program_header_count;
-
-    if count == PN_XNUM {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Rozszerzona liczba nagłówków programu nie jest jeszcze obsługiwana",
-        ));
-    }
+    let count = if header.program_header_count == PN_XNUM {
+        read_extended_program_count(reader, header)?
+    } else {
+        u64::from(header.program_header_count)
+    };
 
     if count == 0 {
         return Ok(Vec::new());
+    }
+
+    if count > MAX_PROGRAM_HEADER_COUNT {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Liczba nagłówków programu przekracza limit narzędzia: 262144",
+        ));
     }
 
     let expected_entry_size: u16 = match header.ident.class {
@@ -315,7 +370,7 @@ pub fn read_program_headers(
 
     let file_size = reader.seek(SeekFrom::End(0))?;
 
-    let table_size = u64::from(count)
+    let table_size = count
         .checked_mul(u64::from(header.program_header_entry_size))
         .ok_or_else(|| invalid_data("Przepełnienie rozmiaru tabeli programu"))?;
 
@@ -323,7 +378,10 @@ pub fn read_program_headers(
 
     reader.seek(SeekFrom::Start(header.program_header_offset))?;
 
-    let mut segments = Vec::with_capacity(usize::from(count));
+    let count = usize::try_from(count)
+        .map_err(|_| invalid_data("Liczba nagłówków nie mieści się w usize"))?;
+
+    let mut segments = Vec::with_capacity(count);
 
     for index in 0..count {
         let segment = read_program_header(reader, header.ident)?;
@@ -413,7 +471,6 @@ mod tests {
     #[test]
     fn reads_elf64_little_endian() {
         let mut input = Cursor::new(valid_ident());
-
         let ident = read_ident(&mut input).unwrap().unwrap();
 
         assert_eq!(ident.class, ElfClass::Elf64);
@@ -437,23 +494,20 @@ mod tests {
 
     #[test]
     fn ignores_non_elf() {
-        let mut input = Cursor::new(b"ordinary text");
-
-        assert_eq!(read_ident(&mut input).unwrap(), None);
+        assert_eq!(
+            read_ident(&mut Cursor::new(b"ordinary text")).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn ignores_short_non_elf() {
-        let mut input = Cursor::new(b"\x7fEL");
-
-        assert_eq!(read_ident(&mut input).unwrap(), None);
+        assert_eq!(read_ident(&mut Cursor::new(b"\x7fEL")).unwrap(), None);
     }
 
     #[test]
     fn reports_truncated_elf_ident() {
-        let mut input = Cursor::new(b"\x7fELF");
-
-        let error = read_ident(&mut input).unwrap_err();
+        let error = read_ident(&mut Cursor::new(b"\x7fELF")).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
     }
@@ -494,7 +548,7 @@ mod header_tests {
     use super::*;
     use std::io::Cursor;
 
-    fn sample_header(class: ElfClass, endian: Endianness) -> Vec<u8> {
+    pub(super) fn sample_header(class: ElfClass, endian: Endianness) -> Vec<u8> {
         let size = match class {
             ElfClass::Elf32 => 52,
             ElfClass::Elf64 => 64,
@@ -525,7 +579,6 @@ mod header_tests {
         };
 
         put(&mut bytes, 24, address_size, 0x12345678, endian);
-
         put(&mut bytes, size_offset, 2, size as u64, endian);
 
         bytes
@@ -566,7 +619,6 @@ mod header_tests {
     #[test]
     fn preserves_64_bit_addresses() {
         let mut bytes = sample_header(ElfClass::Elf64, Endianness::Big);
-
         let entry = 0x123456789abcdef0;
 
         put(&mut bytes, 24, 8, entry, Endianness::Big);
@@ -579,7 +631,6 @@ mod header_tests {
     #[test]
     fn rejects_truncated_header() {
         let mut bytes = sample_header(ElfClass::Elf64, Endianness::Little);
-
         bytes.pop();
 
         let error = read_header(&mut Cursor::new(bytes)).unwrap_err();
@@ -590,7 +641,6 @@ mod header_tests {
     #[test]
     fn rejects_wrong_header_size() {
         let mut bytes = sample_header(ElfClass::Elf64, Endianness::Little);
-
         put(&mut bytes, 52, 2, 52, Endianness::Little);
 
         let error = read_header(&mut Cursor::new(bytes)).unwrap_err();
@@ -696,9 +746,7 @@ mod program_header_tests {
 
     #[test]
     fn rejects_segment_outside_file() {
-        let segment = sample_segment();
-
-        assert!(validate_program_header(&segment, 0x1100).is_err());
+        assert!(validate_program_header(&sample_segment(), 0x1100).is_err());
     }
 
     #[test]
@@ -736,5 +784,85 @@ mod program_header_tests {
         assert_eq!(segment_permissions(5), "R-X");
         assert_eq!(segment_permissions(6), "RW-");
         assert_eq!(segment_permissions(0), "---");
+    }
+}
+
+#[cfg(test)]
+mod extended_program_header_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn fixture(class: ElfClass, endian: Endianness, count: u32) -> (Vec<u8>, ElfHeader) {
+        let raw_header = super::header_tests::sample_header(class, endian);
+
+        let mut header = read_header(&mut Cursor::new(raw_header)).unwrap().unwrap();
+
+        let (section_size, program_size, info_offset): (usize, usize, usize) = match class {
+            ElfClass::Elf32 => (40, 32, 28),
+            ElfClass::Elf64 => (64, 56, 44),
+        };
+
+        let section_offset = 64;
+        let program_offset = section_offset + section_size;
+
+        header.program_header_count = PN_XNUM;
+        header.program_header_offset = program_offset as u64;
+        header.program_header_entry_size = program_size as u16;
+
+        header.section_header_offset = section_offset as u64;
+        header.section_header_entry_size = section_size as u16;
+        header.section_header_count = 1;
+
+        let mut bytes = vec![0_u8; program_offset + count as usize * program_size];
+
+        let count_bytes = match endian {
+            Endianness::Little => count.to_le_bytes(),
+            Endianness::Big => count.to_be_bytes(),
+        };
+
+        let start = section_offset + info_offset;
+        bytes[start..start + 4].copy_from_slice(&count_bytes);
+
+        // Wszystkie wpisy programu mają typ PT_NULL.
+        (bytes, header)
+    }
+
+    #[test]
+    fn reads_extended_count_in_all_layouts() {
+        for class in [ElfClass::Elf32, ElfClass::Elf64] {
+            for endian in [Endianness::Little, Endianness::Big] {
+                let (bytes, header) = fixture(class, endian, u32::from(PN_XNUM));
+
+                let headers = read_program_headers(&mut Cursor::new(bytes), &header).unwrap();
+
+                assert_eq!(headers.len(), usize::from(PN_XNUM));
+                assert!(headers.iter().all(|entry| entry.segment_type == PT_NULL));
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_missing_section_zero() {
+        let (bytes, mut header) = fixture(ElfClass::Elf64, Endianness::Little, 1);
+
+        header.section_header_offset = 0;
+
+        assert!(read_program_headers(&mut Cursor::new(bytes), &header,).is_err());
+    }
+
+    #[test]
+    fn rejects_too_small_extended_count() {
+        let (bytes, header) = fixture(ElfClass::Elf64, Endianness::Little, 1);
+
+        assert!(read_program_headers(&mut Cursor::new(bytes), &header,).is_err());
+    }
+
+    #[test]
+    fn rejects_truncated_extended_table() {
+        let (mut bytes, header) = fixture(ElfClass::Elf64, Endianness::Little, u32::from(PN_XNUM));
+
+        bytes.pop();
+
+        assert!(read_program_headers(&mut Cursor::new(bytes), &header,).is_err());
     }
 }
