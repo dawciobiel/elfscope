@@ -1,4 +1,6 @@
+mod header_numbers;
 mod relocation_types;
+
 use crate::cli::OutputMode;
 use crate::dynamic::DynamicInfo;
 use crate::elf::{self, ElfClass, ElfFile, Endianness};
@@ -23,7 +25,7 @@ fn relocation_type_label(inspection: &Inspection, kind: u32) -> String {
     let header = &inspection.elf.header;
     relocation_types::label(header.ident.class, header.machine, kind)
 }
-fn print_elf(path: &Path, parsed: &ElfFile) {
+fn print_elf(path: &Path, parsed: &ElfFile, section_table: &SectionTable) {
     let header = &parsed.header;
     let endian = match header.ident.endianness {
         Endianness::Little => "little-endian",
@@ -51,13 +53,23 @@ fn print_elf(path: &Path, parsed: &ElfFile) {
     println!("  Rozmiar nagł.:  {} B", header.header_size);
     println!(
         "  Tabela programu: offset={:#x}, wpis={} B, licznik={}",
-        header.program_header_offset, header.program_header_entry_size, header.program_header_count
+        header.program_header_offset,
+        header.program_header_entry_size,
+        header_numbers::program_count(header.program_header_count, parsed.program_headers.len())
     );
     println!(
         "  Tabela sekcji:   offset={:#x}, wpis={} B, licznik={}",
-        header.section_header_offset, header.section_header_entry_size, header.section_header_count
+        header.section_header_offset,
+        header.section_header_entry_size,
+        header_numbers::section_count(header.section_header_count, section_table.headers.len())
     );
-    println!("  Indeks nazw sekcji: {}", header.section_names_index);
+    println!(
+        "  Indeks nazw sekcji: {}",
+        header_numbers::section_names_index(
+            header.section_names_index,
+            section_table.headers.first().map(|section| section.link)
+        )
+    );
     println!("  Nagłówki programu:");
     if parsed.program_headers.is_empty() {
         println!("    Brak");
@@ -359,7 +371,7 @@ pub(crate) fn print_inspection(path: &Path, inspection: &Inspection, mode: Outpu
             );
         }
         OutputMode::Detailed => {
-            print_elf(path, &inspection.elf);
+            print_elf(path, &inspection.elf, &inspection.sections);
             print_entry_analysis(&inspection.elf);
             print_interpreter(inspection.interpreter.as_deref());
             print_dynamic(inspection.dynamic.as_ref());
