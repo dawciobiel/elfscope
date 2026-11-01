@@ -1,0 +1,246 @@
+use std::path::Path;
+
+use crate::cli::OutputMode;
+use crate::dynamic::DynamicInfo;
+use crate::elf::{self, ElfClass, ElfFile, Endianness};
+use crate::inspection::Inspection;
+use crate::mapping;
+use crate::sections::{self, SectionTable};
+
+fn class_name(class: ElfClass) -> &'static str {
+    match class {
+        ElfClass::Elf32 => "ELF32",
+        ElfClass::Elf64 => "ELF64",
+    }
+}
+
+fn section_name(table: &SectionTable, index: usize) -> String {
+    match table.name(index) {
+        Some(bytes) => format!("{:?}", String::from_utf8_lossy(bytes)),
+        None => "<brak nazwy>".to_string(),
+    }
+}
+
+fn print_elf(path: &Path, parsed: &ElfFile) {
+    let header = &parsed.header;
+
+    let endianness = match header.ident.endianness {
+        Endianness::Little => "little-endian",
+        Endianness::Big => "big-endian",
+    };
+
+    println!("{:?}", path);
+    println!("  Klasa:          {}", class_name(header.ident.class));
+    println!("  Kolejność:      {}", endianness);
+    println!("  OS/ABI:         {}", header.ident.os_abi);
+    println!("  Wersja ABI:     {}", header.ident.abi_version);
+    println!("  Wersja ident.:  {}", header.ident.version);
+    println!("  Wersja ELF:     {}", header.version);
+
+    println!(
+        "  Typ:            {} ({})",
+        elf::file_type_name(header.file_type),
+        header.file_type
+    );
+
+    println!(
+        "  Architektura:   {} ({})",
+        elf::machine_name(header.machine),
+        header.machine
+    );
+
+    println!("  Punkt wejścia:  {:#x}", header.entry);
+    println!("  Flagi:          {:#x}", header.flags);
+    println!("  Rozmiar nagł.:  {} B", header.header_size);
+
+    println!(
+        "  Tabela programu: offset={:#x}, wpis={} B, licznik={}",
+        header.program_header_offset, header.program_header_entry_size, header.program_header_count
+    );
+
+    println!(
+        "  Tabela sekcji:   offset={:#x}, wpis={} B, licznik={}",
+        header.section_header_offset, header.section_header_entry_size, header.section_header_count
+    );
+
+    println!("  Indeks nazw sekcji: {}", header.section_names_index);
+    println!("  Nagłówki programu:");
+
+    if parsed.program_headers.is_empty() {
+        println!("    Brak");
+    }
+
+    for (index, segment) in parsed.program_headers.iter().enumerate() {
+        println!(
+            "    #{:<2} {:<14} type={:#x} {} flags={:#x}",
+            index,
+            elf::segment_type_name(segment.segment_type),
+            segment.segment_type,
+            elf::segment_permissions(segment.flags),
+            segment.flags
+        );
+
+        println!(
+            "        offset={:#x} vaddr={:#x} paddr={:#x}",
+            segment.offset, segment.virtual_address, segment.physical_address
+        );
+
+        println!(
+            "        filesz={:#x} memsz={:#x} align={:#x}",
+            segment.file_size, segment.memory_size, segment.alignment
+        );
+    }
+}
+
+fn print_interpreter(path: Option<&[u8]>) {
+    match path {
+        Some(bytes) => {
+            println!("  Interpreter ELF: {:?}", String::from_utf8_lossy(bytes));
+        }
+        None => {
+            println!("  Interpreter ELF: brak wpisu PT_INTERP");
+        }
+    }
+}
+
+fn print_optional_dynamic_string(label: &str, value: Option<&[u8]>) {
+    match value {
+        Some(bytes) => {
+            println!("    {}: {:?}", label, String::from_utf8_lossy(bytes));
+        }
+        None => {
+            println!("    {}: brak wpisu", label);
+        }
+    }
+}
+
+fn print_dynamic(info: Option<&DynamicInfo>) {
+    println!("  Informacje dynamiczne:");
+
+    let Some(info) = info else {
+        println!("    Brak wpisu PT_DYNAMIC");
+        return;
+    };
+
+    print_optional_dynamic_string("SONAME", info.soname.as_deref());
+    print_optional_dynamic_string("RPATH", info.rpath.as_deref());
+    print_optional_dynamic_string("RUNPATH", info.runpath.as_deref());
+
+    println!("  Biblioteki DT_NEEDED:");
+
+    if info.needed.is_empty() {
+        println!("    Brak wpisów DT_NEEDED");
+    }
+
+    for name in &info.needed {
+        println!("    {:?}", String::from_utf8_lossy(name));
+    }
+}
+
+fn print_sections(table: &SectionTable) {
+    println!("  Sekcje:");
+
+    if table.headers.is_empty() {
+        println!("    Brak");
+        return;
+    }
+
+    for (index, section) in table.headers.iter().enumerate() {
+        println!(
+            "    #{:<2} {} {} ({:#x}) {} flags={:#x}",
+            index,
+            section_name(table, index),
+            sections::section_type_name(section.section_type),
+            section.section_type,
+            sections::section_flags(section.flags),
+            section.flags
+        );
+
+        println!(
+            "        offset={:#x} addr={:#x} size={:#x}",
+            section.offset, section.address, section.size
+        );
+
+        println!(
+            "        link={} info={} align={:#x} entsize={:#x}",
+            section.link, section.info, section.alignment, section.entry_size
+        );
+    }
+}
+
+fn print_mapping(parsed: &ElfFile, table: &SectionTable) {
+    println!("  Sekcje w LOAD i TLS (tylko niepuste, z flagą ALLOC):");
+
+    if table.headers.is_empty() {
+        println!("    Brak tabeli sekcji — nie można wyznaczyć mapowania");
+        return;
+    }
+
+    let mut supported_count = 0;
+
+    for (segment_index, segment) in parsed.program_headers.iter().enumerate() {
+        if !mapping::is_supported_segment(segment) {
+            continue;
+        }
+
+        supported_count += 1;
+
+        let matching_sections: Vec<String> = table
+            .headers
+            .iter()
+            .enumerate()
+            .filter(|(_, section)| mapping::section_belongs_to_segment(section, segment))
+            .map(|(section_index, _)| {
+                format!("#{} {}", section_index, section_name(table, section_index))
+            })
+            .collect();
+
+        println!(
+            "    Segment #{} {} {}:",
+            segment_index,
+            elf::segment_type_name(segment.segment_type),
+            elf::segment_permissions(segment.flags)
+        );
+
+        if matching_sections.is_empty() {
+            println!("        Brak pasujących sekcji");
+        } else {
+            println!("        {}", matching_sections.join(", "));
+        }
+    }
+
+    if supported_count == 0 {
+        println!("    Brak wpisów LOAD i TLS");
+    }
+}
+
+pub(crate) fn print_inspection(path: &Path, inspection: &Inspection, mode: OutputMode) {
+    match mode {
+        OutputMode::Summary => {
+            let header = &inspection.elf.header;
+
+            let needed_count = match &inspection.dynamic {
+                Some(info) => info.needed.len(),
+                None => 0,
+            };
+
+            println!(
+                "{:?} | {} | {} | typ={} | sekcje={} | DT_NEEDED={}",
+                path,
+                class_name(header.ident.class),
+                elf::machine_name(header.machine),
+                header.file_type,
+                inspection.sections.headers.len(),
+                needed_count
+            );
+        }
+        OutputMode::Detailed => {
+            print_elf(path, &inspection.elf);
+            print_interpreter(inspection.interpreter.as_deref());
+            print_dynamic(inspection.dynamic.as_ref());
+            print_sections(&inspection.sections);
+            print_mapping(&inspection.elf, &inspection.sections);
+            println!();
+        }
+    }
+}
