@@ -1,3 +1,4 @@
+use std::fmt;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 
 use crate::elf::{ElfClass, ElfHeader, Endianness};
@@ -6,8 +7,10 @@ use crate::sections::SectionHeader;
 const SHT_SYMTAB: u32 = 2;
 const SHT_STRTAB: u32 = 3;
 const SHT_DYNSYM: u32 = 11;
+const SHT_SYMTAB_SHNDX: u32 = 18;
 
 const SHN_UNDEF: u16 = 0;
+const SHN_LORESERVE: u32 = 0xff00;
 const SHN_XINDEX: u16 = 0xffff;
 
 // Limity naszego narzędzia.
@@ -16,6 +19,23 @@ const MAX_SYMBOL_TABLES: usize = 128;
 const MAX_STRING_TABLE_SIZE: u64 = 16 * 1024 * 1024;
 const MAX_PREVIEW_SYMBOLS: usize = 20;
 const MAX_PREVIEW_NAME_BYTES: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolSectionIndex {
+    Direct(u16),
+    Extended(u32),
+}
+
+impl fmt::Display for SymbolSectionIndex {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Direct(index) => write!(formatter, "{}", index),
+            Self::Extended(index) => {
+                write!(formatter, "{} -> {}", SHN_XINDEX, index)
+            }
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SymbolPreview {
@@ -27,7 +47,7 @@ pub struct SymbolPreview {
     pub binding: u8,
     pub symbol_type: u8,
     pub visibility: u8,
-    pub section_index: u16,
+    pub section_index: SymbolSectionIndex,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -137,7 +157,7 @@ fn validate_range(offset: u64, size: u64, file_size: u64) -> io::Result<()> {
 
     if end > file_size {
         return Err(invalid_data(
-            "Dane symboli lub ich napisów wykraczają poza plik",
+            "Dane symboli lub ich tablic pomocniczych wykraczają poza plik",
         ));
     }
 
@@ -189,6 +209,105 @@ fn load_strings(
     }
 
     Ok(bytes)
+}
+
+fn load_extended_indices(
+    reader: &mut (impl Read + Seek),
+    sections: &[SectionHeader],
+    symbol_table_index: usize,
+    symbol_count: u64,
+    file_size: u64,
+    endian: Endianness,
+) -> io::Result<Option<Vec<u32>>> {
+    let mut matches = sections.iter().filter(|section| {
+        section.section_type == SHT_SYMTAB_SHNDX
+            && usize::try_from(section.link).ok() == Some(symbol_table_index)
+    });
+
+    let section = match matches.next() {
+        Some(section) => section,
+        None => return Ok(None),
+    };
+
+    if matches.next().is_some() {
+        return Err(invalid_data(
+            "Więcej niż jedna tablica SYMTAB_SHNDX dla tej samej tablicy symboli",
+        ));
+    }
+
+    if section.entry_size != 4 {
+        return Err(invalid_data(
+            "SYMTAB_SHNDX: rozmiar wpisu musi wynosić 4 bajty",
+        ));
+    }
+
+    if section.info != 0 {
+        return Err(invalid_data("SYMTAB_SHNDX: pole sh_info musi wynosić zero"));
+    }
+
+    let expected_size = symbol_count
+        .checked_mul(4)
+        .ok_or_else(|| invalid_data("Przepełnienie rozmiaru SYMTAB_SHNDX"))?;
+
+    if section.size != expected_size {
+        return Err(invalid_data(
+            "SYMTAB_SHNDX: liczba wpisów nie odpowiada liczbie symboli",
+        ));
+    }
+
+    validate_range(section.offset, section.size, file_size)?;
+
+    let count = usize::try_from(symbol_count)
+        .map_err(|_| invalid_data("Liczba indeksów nie mieści się w usize"))?;
+
+    reader.seek(SeekFrom::Start(section.offset))?;
+
+    let mut indices = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        let mut bytes = [0_u8; 4];
+        reader.read_exact(&mut bytes)?;
+        indices.push(u32_at(&bytes, 0, endian));
+    }
+
+    Ok(Some(indices))
+}
+
+fn resolve_section_index(
+    raw: u16,
+    auxiliary: Option<u32>,
+    section_count: usize,
+) -> io::Result<SymbolSectionIndex> {
+    if raw != SHN_XINDEX {
+        if auxiliary.is_some_and(|value| value != 0) {
+            return Err(invalid_data(
+                "Niezerowy wpis SYMTAB_SHNDX dla symbolu bez SHN_XINDEX",
+            ));
+        }
+
+        return Ok(SymbolSectionIndex::Direct(raw));
+    }
+
+    let actual = auxiliary.ok_or_else(|| {
+        invalid_data("Symbol z SHN_XINDEX nie ma powiązanej tablicy SYMTAB_SHNDX")
+    })?;
+
+    if actual < SHN_LORESERVE {
+        return Err(invalid_data(
+            "Rozszerzony indeks symbolu jest mniejszy niż SHN_LORESERVE",
+        ));
+    }
+
+    let index = usize::try_from(actual)
+        .map_err(|_| invalid_data("Rozszerzony indeks nie mieści się w usize"))?;
+
+    if index >= section_count {
+        return Err(invalid_data(
+            "Rozszerzony indeks symbolu wykracza poza tabelę sekcji",
+        ));
+    }
+
+    Ok(SymbolSectionIndex::Extended(actual))
 }
 
 fn preview_name(tail: &[u8]) -> (Vec<u8>, bool) {
@@ -253,6 +372,15 @@ pub fn read_symbol_summaries(
 
         let strings = load_strings(&mut reader, section, sections, file_size, count)?;
 
+        let extended_indices = load_extended_indices(
+            &mut reader,
+            sections,
+            section_index,
+            count,
+            file_size,
+            header.ident.endianness,
+        )?;
+
         reader.seek(SeekFrom::Start(section.offset))?;
 
         let mut summary = SymbolTableSummary {
@@ -267,6 +395,19 @@ pub fn read_symbol_summaries(
             reader.read_exact(&mut bytes[..size])?;
 
             let record = decode_record(&bytes[..size], header.ident.class, header.ident.endianness);
+
+            let auxiliary = match &extended_indices {
+                Some(indices) => {
+                    let position = usize::try_from(index)
+                        .map_err(|_| invalid_data("Indeks symbolu nie mieści się w usize"))?;
+
+                    Some(indices[position])
+                }
+                None => None,
+            };
+
+            let resolved_index =
+                resolve_section_index(record.section_index, auxiliary, sections.len())?;
 
             let binding = record.info >> 4;
             let symbol_type = record.info & 0x0f;
@@ -295,8 +436,6 @@ pub fn read_symbol_summaries(
             let name_offset = usize::try_from(record.name_offset)
                 .map_err(|_| invalid_data("st_name nie mieści się w usize"))?;
 
-            // Końcowy bajt zerowy całej tabeli gwarantuje zakończenie
-            // każdego napisu rozpoczynającego się w jej granicach.
             let tail = strings
                 .get(name_offset..)
                 .filter(|tail| !tail.is_empty())
@@ -323,7 +462,7 @@ pub fn read_symbol_summaries(
                     binding,
                     symbol_type,
                     visibility: record.other & 0x03,
-                    section_index: record.section_index,
+                    section_index: resolved_index,
                 });
             }
         }
@@ -433,6 +572,45 @@ mod tests {
         (bytes, vec![symbols, strings])
     }
 
+    fn read_default(
+        bytes: Vec<u8>,
+        sections: &[SectionHeader],
+    ) -> io::Result<Vec<SymbolTableSummary>> {
+        read_symbol_summaries(
+            &mut Cursor::new(bytes),
+            &header(ElfClass::Elf64, Endianness::Little),
+            sections,
+        )
+    }
+
+    fn append_indices(
+        bytes: &mut Vec<u8>,
+        sections: &mut Vec<SectionHeader>,
+        values: &[u32],
+        endian: Endianness,
+    ) {
+        let auxiliary = SectionHeader {
+            section_type: SHT_SYMTAB_SHNDX,
+            offset: bytes.len() as u64,
+            size: (values.len() * 4) as u64,
+            link: 0,
+            info: 0,
+            entry_size: 4,
+            ..section(1, 0)
+        };
+
+        for value in values {
+            let encoded = match endian {
+                Endianness::Little => value.to_le_bytes(),
+                Endianness::Big => value.to_be_bytes(),
+            };
+
+            bytes.extend_from_slice(&encoded);
+        }
+
+        sections.push(auxiliary);
+    }
+
     #[test]
     fn summarizes_all_record_layouts() {
         for class in [ElfClass::Elf32, ElfClass::Elf64] {
@@ -456,12 +634,15 @@ mod tests {
                 assert_eq!(summary.weaks, 1);
                 assert_eq!(summary.undefined, 2);
                 assert_eq!(summary.extended_indices, 0);
-
                 assert_eq!(summary.preview.len(), 2);
                 assert_eq!(summary.preview[0].name, b"example_function");
                 assert_eq!(summary.preview[0].value, 0x1234);
                 assert_eq!(summary.preview[0].size, 16);
                 assert_eq!(summary.preview[1].name, b"example_object");
+                assert_eq!(
+                    summary.preview[0].section_index,
+                    SymbolSectionIndex::Direct(1)
+                );
             }
         }
     }
@@ -471,14 +652,7 @@ mod tests {
         let mut section = section(24, 1);
         section.section_type = 1;
 
-        let result = read_symbol_summaries(
-            &mut Cursor::new(Vec::<u8>::new()),
-            &header(ElfClass::Elf64, Endianness::Little),
-            &[section],
-        )
-        .unwrap();
-
-        assert!(result.is_empty());
+        assert!(read_default(Vec::new(), &[section]).unwrap().is_empty());
     }
 
     #[test]
@@ -487,14 +661,7 @@ mod tests {
 
         sections[0].entry_size = 16;
 
-        assert!(
-            read_symbol_summaries(
-                &mut Cursor::new(bytes),
-                &header(ElfClass::Elf64, Endianness::Little),
-                &sections,
-            )
-            .is_err()
-        );
+        assert!(read_default(bytes, &sections).is_err());
     }
 
     #[test]
@@ -503,14 +670,7 @@ mod tests {
 
         sections[0].size -= 1;
 
-        assert!(
-            read_symbol_summaries(
-                &mut Cursor::new(bytes),
-                &header(ElfClass::Elf64, Endianness::Little),
-                &sections,
-            )
-            .is_err()
-        );
+        assert!(read_default(bytes, &sections).is_err());
     }
 
     #[test]
@@ -519,14 +679,7 @@ mod tests {
 
         bytes.truncate(23);
 
-        assert!(
-            read_symbol_summaries(
-                &mut Cursor::new(bytes),
-                &header(ElfClass::Elf64, Endianness::Little),
-                &sections,
-            )
-            .is_err()
-        );
+        assert!(read_default(bytes, &sections).is_err());
     }
 
     #[test]
@@ -534,12 +687,7 @@ mod tests {
         let mut section = section(24, 0);
         section.size = 24 * (MAX_SYMBOL_COUNT + 1);
 
-        let error = read_symbol_summaries(
-            &mut Cursor::new(Vec::<u8>::new()),
-            &header(ElfClass::Elf64, Endianness::Little),
-            &[section],
-        )
-        .unwrap_err();
+        let error = read_default(Vec::new(), &[section]).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
     }
@@ -550,12 +698,7 @@ mod tests {
 
         sections[0].size = 0;
 
-        let result = read_symbol_summaries(
-            &mut Cursor::new(bytes),
-            &header(ElfClass::Elf64, Endianness::Little),
-            &sections,
-        )
-        .unwrap();
+        let result = read_default(bytes, &sections).unwrap();
 
         assert_eq!(result[0].total, 0);
         assert!(result[0].preview.is_empty());
@@ -567,14 +710,7 @@ mod tests {
 
         sections[0].offset = u64::MAX;
 
-        assert!(
-            read_symbol_summaries(
-                &mut Cursor::new(bytes),
-                &header(ElfClass::Elf64, Endianness::Little),
-                &sections,
-            )
-            .is_err()
-        );
+        assert!(read_default(bytes, &sections).is_err());
     }
 
     #[test]
@@ -583,14 +719,7 @@ mod tests {
 
         sections[0].link = 999;
 
-        assert!(
-            read_symbol_summaries(
-                &mut Cursor::new(bytes),
-                &header(ElfClass::Elf64, Endianness::Little),
-                &sections,
-            )
-            .is_err()
-        );
+        assert!(read_default(bytes, &sections).is_err());
     }
 
     #[test]
@@ -599,14 +728,7 @@ mod tests {
 
         sections[1].section_type = 1;
 
-        assert!(
-            read_symbol_summaries(
-                &mut Cursor::new(bytes),
-                &header(ElfClass::Elf64, Endianness::Little),
-                &sections,
-            )
-            .is_err()
-        );
+        assert!(read_default(bytes, &sections).is_err());
     }
 
     #[test]
@@ -615,14 +737,7 @@ mod tests {
 
         put(&mut bytes, 24, 4, 999, Endianness::Little);
 
-        assert!(
-            read_symbol_summaries(
-                &mut Cursor::new(bytes),
-                &header(ElfClass::Elf64, Endianness::Little),
-                &sections,
-            )
-            .is_err()
-        );
+        assert!(read_default(bytes, &sections).is_err());
     }
 
     #[test]
@@ -634,5 +749,96 @@ mod tests {
 
         assert_eq!(name.len(), MAX_PREVIEW_NAME_BYTES);
         assert!(truncated);
+    }
+
+    #[test]
+    fn resolves_extended_indices_in_all_layouts() {
+        for class in [ElfClass::Elf32, ElfClass::Elf64] {
+            for endian in [Endianness::Little, Endianness::Big] {
+                let (mut bytes, mut sections) = fixture(class, endian);
+
+                let index_offset = match class {
+                    ElfClass::Elf32 => 14,
+                    ElfClass::Elf64 => 6,
+                };
+
+                put(
+                    &mut bytes,
+                    record_size(class) + index_offset,
+                    2,
+                    u64::from(SHN_XINDEX),
+                    endian,
+                );
+
+                append_indices(&mut bytes, &mut sections, &[0, SHN_LORESERVE, 0], endian);
+
+                let mut unused = section(1, 0);
+                unused.section_type = 0;
+                unused.link = 0;
+
+                sections.resize(SHN_LORESERVE as usize + 1, unused);
+                sections[SHN_LORESERVE as usize].section_type = 1;
+
+                let result = read_symbol_summaries(
+                    &mut Cursor::new(bytes),
+                    &header(class, endian),
+                    &sections,
+                )
+                .unwrap();
+
+                assert_eq!(result[0].extended_indices, 1);
+
+                assert_eq!(
+                    result[0].preview[0].section_index,
+                    SymbolSectionIndex::Extended(SHN_LORESERVE)
+                );
+
+                assert_eq!(
+                    result[0].preview[0].section_index.to_string(),
+                    "65535 -> 65280"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_missing_extended_table() {
+        assert!(resolve_section_index(SHN_XINDEX, None, 65_536).is_err());
+    }
+
+    #[test]
+    fn rejects_nonzero_auxiliary_for_direct_index() {
+        assert!(resolve_section_index(1, Some(2), 3).is_err());
+    }
+
+    #[test]
+    fn rejects_extended_index_outside_sections() {
+        assert!(resolve_section_index(SHN_XINDEX, Some(65_536), 65_536).is_err());
+    }
+
+    #[test]
+    fn rejects_too_small_extended_index() {
+        assert!(resolve_section_index(SHN_XINDEX, Some(1), 65_536).is_err());
+    }
+
+    #[test]
+    fn rejects_wrong_auxiliary_table_length() {
+        let (mut bytes, mut sections) = fixture(ElfClass::Elf64, Endianness::Little);
+
+        append_indices(&mut bytes, &mut sections, &[0, 0], Endianness::Little);
+
+        assert!(read_default(bytes, &sections).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_auxiliary_tables() {
+        let (mut bytes, mut sections) = fixture(ElfClass::Elf64, Endianness::Little);
+
+        append_indices(&mut bytes, &mut sections, &[0, 0, 0], Endianness::Little);
+
+        let duplicate = sections.last().unwrap().clone();
+        sections.push(duplicate);
+
+        assert!(read_default(bytes, &sections).is_err());
     }
 }
