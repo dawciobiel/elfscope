@@ -267,6 +267,36 @@ fn print_mapping(parsed: &ElfFile, table: &SectionTable) {
     }
 }
 
+fn print_symbols(inspection: &Inspection) {
+    println!("  Tablice symboli:");
+
+    if inspection.symbols.is_empty() {
+        println!("    Brak sekcji SYMTAB i DYNSYM");
+        return;
+    }
+
+    for table in &inspection.symbols {
+        println!(
+            "    Sekcja #{} {}: wpisy={}",
+            table.section_index,
+            section_name(&inspection.sections, table.section_index),
+            table.total
+        );
+
+        println!("        FUNC={}, OBJECT={}", table.functions, table.objects);
+
+        println!(
+            "        LOCAL={}, GLOBAL={}, WEAK={}",
+            table.locals, table.globals, table.weaks
+        );
+
+        println!(
+            "        SHN_UNDEF={}, SHN_XINDEX={}",
+            table.undefined, table.extended_indices
+        );
+    }
+}
+
 pub(crate) fn print_inspection(path: &Path, inspection: &Inspection, mode: OutputMode) {
     match mode {
         OutputMode::Summary => {
@@ -294,6 +324,7 @@ pub(crate) fn print_inspection(path: &Path, inspection: &Inspection, mode: Outpu
             print_dynamic(inspection.dynamic.as_ref());
             print_sections(&inspection.sections);
             print_mapping(&inspection.elf, &inspection.sections);
+            print_symbols(inspection);
             println!();
         }
     }

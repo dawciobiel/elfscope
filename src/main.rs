@@ -6,6 +6,7 @@ mod interpreter;
 mod mapping;
 mod report;
 mod sections;
+mod symbols;
 
 use std::env;
 use std::fs;
