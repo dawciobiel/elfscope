@@ -1,4 +1,5 @@
 use crate::cli::{OutputFormat, ScanOptions};
+use crate::relocations::RelocationLimits;
 use crate::{inspection, json_report, report};
 use std::fs;
 use std::io::{self, Write};
@@ -14,9 +15,9 @@ pub(crate) struct ScanStats {
     pub depth_limited: u64,
     pub max_files_reached: bool,
 }
-fn error(path: &Path, error: &io::Error, stats: &mut ScanStats) {
+fn error(path: &Path, cause: &io::Error, stats: &mut ScanStats) {
     stats.errors += 1;
-    eprintln!("Błąd dla {:?}: {}", path, error);
+    eprintln!("Błąd dla {:?}: {}", path, cause);
 }
 fn excluded(options: &ScanOptions, path: &Path, depth: usize) -> bool {
     depth != 0
@@ -39,7 +40,6 @@ fn path_bytes(path: &Path) -> Vec<u8> {
 fn path_bytes(path: &Path) -> Vec<u8> {
     path.to_string_lossy().as_bytes().to_vec()
 }
-
 fn output(
     options: &ScanOptions,
     path: &Path,
@@ -61,8 +61,7 @@ fn output(
     }
     Ok(())
 }
-
-pub(crate) fn scan(options: &ScanOptions) -> io::Result<ScanStats> {
+pub(crate) fn scan(options: &ScanOptions, limits: &RelocationLimits) -> io::Result<ScanStats> {
     let mut stats = ScanStats::default();
     let mut pending = vec![(options.path.clone(), 0_usize)];
     while let Some((path, depth)) = pending.pop() {
@@ -118,7 +117,7 @@ pub(crate) fn scan(options: &ScanOptions) -> io::Result<ScanStats> {
             break;
         }
         stats.files += 1;
-        match inspection::inspect_file(&path) {
+        match inspection::inspect_file(&path, limits) {
             Ok(Some(inspection)) => {
                 stats.elf_files += 1;
                 output(options, &path, &inspection)?;
@@ -129,7 +128,6 @@ pub(crate) fn scan(options: &ScanOptions) -> io::Result<ScanStats> {
     }
     Ok(stats)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

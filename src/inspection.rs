@@ -2,7 +2,7 @@ use crate::build_id::{self, BuildId};
 use crate::dynamic::{self, DynamicInfo};
 use crate::elf::{self, ElfFile};
 use crate::interpreter;
-use crate::relocations::{self, RelocationTableSummary};
+use crate::relocations::{self, RelocationLimits, RelocationTableSummary};
 use crate::sections::{self, SectionTable};
 use crate::symbols::{self, SymbolTableSummary};
 use std::fs::File;
@@ -18,8 +18,10 @@ pub(crate) struct Inspection {
     pub(crate) relocations: Vec<RelocationTableSummary>,
     pub(crate) build_ids: Vec<BuildId>,
 }
-
-pub(crate) fn inspect_file(path: &Path) -> io::Result<Option<Inspection>> {
+pub(crate) fn inspect_file(
+    path: &Path,
+    limits: &RelocationLimits,
+) -> io::Result<Option<Inspection>> {
     let mut file = File::open(path)?;
     let parsed = match elf::read_elf(&mut file)? {
         Some(parsed) => parsed,
@@ -29,8 +31,12 @@ pub(crate) fn inspect_file(path: &Path) -> io::Result<Option<Inspection>> {
     let dynamic = dynamic::read_dynamic(&mut file, &parsed)?;
     let sections = sections::read_sections(&mut file, &parsed.header)?;
     let symbols = symbols::read_symbol_summaries(&mut file, &parsed.header, &sections.headers)?;
-    let relocations =
-        relocations::read_relocation_summaries(&mut file, &parsed.header, &sections.headers)?;
+    let relocations = relocations::read_relocation_summaries_with_limits(
+        &mut file,
+        &parsed.header,
+        &sections.headers,
+        limits,
+    )?;
     let build_ids = build_id::read_build_ids(
         &mut file,
         &parsed.header,

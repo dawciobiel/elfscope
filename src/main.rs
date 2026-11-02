@@ -11,7 +11,6 @@ mod report;
 mod scanner;
 mod sections;
 mod symbols;
-
 use cli::Action;
 use std::env;
 use std::io;
@@ -36,7 +35,14 @@ fn main() -> ExitCode {
         }
         Action::Scan(options) => options,
     };
-    let stats = match scanner::scan(&options) {
+    let limits = match relocations::RelocationLimits::from_env() {
+        Ok(limits) => limits,
+        Err(error) => {
+            eprintln!("Nieprawidłowa konfiguracja limitów relokacji: {}", error);
+            return ExitCode::from(2);
+        }
+    };
+    let stats = match scanner::scan(&options, &limits) {
         Ok(stats) => stats,
         Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return ExitCode::SUCCESS,
         Err(error) => {
