@@ -1,10 +1,9 @@
 use crate::cli::{OutputFormat, ScanOptions};
 use crate::relocations::RelocationLimits;
-use crate::{inspection, json_report, report};
+use crate::{diagnostics, inspection, json_report, report};
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
-
 #[derive(Default)]
 pub(crate) struct ScanStats {
     pub files: u64,
@@ -15,9 +14,18 @@ pub(crate) struct ScanStats {
     pub depth_limited: u64,
     pub max_files_reached: bool,
 }
-fn error(path: &Path, cause: &io::Error, stats: &mut ScanStats) {
+fn error(
+    path: &Path,
+    cause: &io::Error,
+    stats: &mut ScanStats,
+    options: &ScanOptions,
+) -> io::Result<()> {
     stats.errors += 1;
     eprintln!("Błąd dla {:?}: {}", path, cause);
+    if options.json_errors {
+        diagnostics::write_json(&diagnostics::error_record(path, cause))?;
+    }
+    Ok(())
 }
 fn excluded(options: &ScanOptions, path: &Path, depth: usize) -> bool {
     depth != 0
@@ -47,12 +55,7 @@ fn output(
 ) -> io::Result<()> {
     match options.format {
         OutputFormat::Text => report::print_inspection(path, inspection, options.mode),
-        OutputFormat::JsonLines => {
-            let mut bytes = serde_json::to_vec(&json_report::record(path, inspection))
-                .map_err(io::Error::other)?;
-            bytes.push(b'\n');
-            io::stdout().lock().write_all(&bytes)?;
-        }
+        OutputFormat::JsonLines => diagnostics::write_json(&json_report::record(path, inspection))?,
         OutputFormat::Paths => {
             let mut bytes = path_bytes(path);
             bytes.push(if options.null_separator { 0 } else { b'\n' });
@@ -72,7 +75,7 @@ pub(crate) fn scan(options: &ScanOptions, limits: &RelocationLimits) -> io::Resu
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(cause) => {
-                error(&path, &cause, &mut stats);
+                error(&path, &cause, &mut stats, options)?;
                 continue;
             }
         };
@@ -88,7 +91,7 @@ pub(crate) fn scan(options: &ScanOptions, limits: &RelocationLimits) -> io::Resu
             let entries = match fs::read_dir(&path) {
                 Ok(entries) => entries,
                 Err(cause) => {
-                    error(&path, &cause, &mut stats);
+                    error(&path, &cause, &mut stats, options)?;
                     continue;
                 }
             };
@@ -96,7 +99,7 @@ pub(crate) fn scan(options: &ScanOptions, limits: &RelocationLimits) -> io::Resu
             for entry in entries {
                 match entry {
                     Ok(entry) => children.push(entry.path()),
-                    Err(cause) => error(&path, &cause, &mut stats),
+                    Err(cause) => error(&path, &cause, &mut stats, options)?,
                 }
             }
             children.sort();
@@ -123,7 +126,7 @@ pub(crate) fn scan(options: &ScanOptions, limits: &RelocationLimits) -> io::Resu
                 output(options, &path, &inspection)?;
             }
             Ok(None) => {}
-            Err(cause) => error(&path, &cause, &mut stats),
+            Err(cause) => error(&path, &cause, &mut stats, options)?,
         }
     }
     Ok(stats)

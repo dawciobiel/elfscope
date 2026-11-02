@@ -1,5 +1,6 @@
 mod build_id;
 mod cli;
+mod diagnostics;
 mod dynamic;
 mod elf;
 mod inspection;
@@ -15,7 +16,15 @@ use cli::Action;
 use std::env;
 use std::io;
 use std::process::ExitCode;
-
+use std::time::Instant;
+fn output_error(error: io::Error) -> ExitCode {
+    if error.kind() == io::ErrorKind::BrokenPipe {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("Błąd skanowania lub zapisu wyniku: {}", error);
+        ExitCode::FAILURE
+    }
+}
 fn main() -> ExitCode {
     let action = match cli::parse(env::args_os().skip(1)) {
         Ok(action) => action,
@@ -42,14 +51,21 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let started = Instant::now();
     let stats = match scanner::scan(&options, &limits) {
         Ok(stats) => stats,
-        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("Błąd skanowania lub zapisu wyniku: {}", error);
-            return ExitCode::FAILURE;
-        }
+        Err(error) => return output_error(error),
     };
+    if options.json_stats {
+        if let Err(error) = diagnostics::write_json(&diagnostics::summary(
+            &options,
+            &limits,
+            &stats,
+            started.elapsed(),
+        )) {
+            return output_error(error);
+        }
+    }
     if !options.quiet {
         eprintln!();
         eprintln!("Sprawdzone zwykłe pliki: {}", stats.files);

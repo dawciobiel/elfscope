@@ -1,6 +1,5 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
     Detailed,
@@ -12,7 +11,6 @@ pub enum OutputFormat {
     JsonLines,
     Paths,
 }
-
 #[derive(Debug, PartialEq, Eq)]
 pub struct ScanOptions {
     pub path: PathBuf,
@@ -23,22 +21,21 @@ pub struct ScanOptions {
     pub excludes: Vec<OsString>,
     pub null_separator: bool,
     pub quiet: bool,
+    pub json_errors: bool,
+    pub json_stats: bool,
 }
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
     Help,
     Version,
     Scan(ScanOptions),
 }
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Selection {
     Summary,
     Json,
     Paths,
 }
-
 pub const HELP: &str = "\
 Użycie: elfscope [opcje] <katalog-lub-plik>
        elfscope --help
@@ -49,13 +46,15 @@ Wyjście (opcje wzajemnie wykluczające się):
   --json              Jeden obiekt JSON na linię (JSON Lines)
   --paths             Same ścieżki przeanalizowanych ELF-ów
   --null              Separator NUL, tylko razem z --paths
+  --json-errors       Dodaj rekordy kind=error; wymaga --json
+  --json-stats        Dodaj końcowy rekord kind=scan_summary; wymaga --json
 
 Skanowanie:
   --max-depth N       Maksymalna głębokość; ścieżka startowa ma głębokość 0
   --no-recursive      Odpowiednik --max-depth 1
   --max-files N       Maksymalna liczba sprawdzanych zwykłych plików; N > 0
   --exclude NAME      Pomijaj potomne wpisy o dokładnie tej nazwie; opcja powtarzalna
-  --quiet             Nie wypisuj końcowych liczników; błędy nadal trafiają na stderr
+  --quiet             Nie wypisuj końcowych liczników na stderr; nie ukrywa błędów
 
 Pozostałe:
   -h, --help          Pomoc
@@ -72,9 +71,8 @@ Program nie modyfikuje ani nie uruchamia analizowanych plików.
 Kody zakończenia:
   0  Brak zgłoszonych błędów; także kontrolowane zakończenie po limicie
   1  Błąd skanowania, analizy lub zapisu wyniku
-  2  Nieprawidłowe argumenty
+  2  Nieprawidłowe argumenty lub konfiguracja limitów
 ";
-
 fn select(current: &mut Option<Selection>, value: Selection) -> Result<(), String> {
     if current.is_some_and(|previous| previous != value) {
         return Err("--summary, --json i --paths są wzajemnie wykluczające się".into());
@@ -93,7 +91,6 @@ fn depth(current: &mut Option<usize>, value: usize) -> Result<(), String> {
     *current = Some(value);
     Ok(())
 }
-
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, String> {
     let mut args = args.into_iter();
     let mut path = None;
@@ -104,6 +101,8 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, String>
     let mut excludes = Vec::new();
     let mut null_separator = false;
     let mut quiet = false;
+    let mut json_errors = false;
+    let mut json_stats = false;
     while let Some(arg) = args.next() {
         if options_enabled {
             if arg == "--" {
@@ -134,6 +133,14 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, String>
             }
             if arg == "--quiet" {
                 quiet = true;
+                continue;
+            }
+            if arg == "--json-errors" {
+                json_errors = true;
+                continue;
+            }
+            if arg == "--json-stats" {
+                json_stats = true;
                 continue;
             }
             if arg == "--no-recursive" {
@@ -195,6 +202,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, String>
     if null_separator && format != OutputFormat::Paths {
         return Err("--null wymaga --paths".into());
     }
+    if (json_errors || json_stats) && format != OutputFormat::JsonLines {
+        return Err("--json-errors i --json-stats wymagają --json".into());
+    }
     Ok(Action::Scan(ScanOptions {
         path,
         mode,
@@ -204,9 +214,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, String>
         excludes,
         null_separator,
         quiet,
+        json_errors,
+        json_stats,
     }))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,5 +324,19 @@ mod tests {
     fn no_recursive_means_depth_one() {
         assert_eq!(scan(&["--no-recursive", "example"]).max_depth, Some(1));
         assert!(parse(args(&["--no-recursive", "--max-depth", "2", "example"])).is_err());
+    }
+    #[test]
+    fn enables_json_error_events() {
+        assert!(scan(&["--json-errors", "--json", "example"]).json_errors);
+    }
+    #[test]
+    fn enables_json_summary_events() {
+        assert!(scan(&["--json", "--json-stats", "--quiet", "example"]).json_stats);
+    }
+    #[test]
+    fn requires_json_for_event_options() {
+        for flag in ["--json-errors", "--json-stats"] {
+            assert!(parse(args(&[flag, "example"])).is_err());
+        }
     }
 }
