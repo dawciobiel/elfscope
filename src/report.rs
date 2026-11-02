@@ -8,7 +8,6 @@ use crate::inspection::Inspection;
 use crate::mapping;
 use crate::sections::{self, SectionTable};
 use std::path::Path;
-
 fn class_name(class: ElfClass) -> &'static str {
     match class {
         ElfClass::Elf32 => "ELF32",
@@ -18,93 +17,93 @@ fn class_name(class: ElfClass) -> &'static str {
 fn section_name(table: &SectionTable, index: usize) -> String {
     match table.name(index) {
         Some(bytes) => format!("{:?}", String::from_utf8_lossy(bytes)),
-        None => "<brak nazwy>".to_string(),
+        None => "<brak nazwy>".into(),
     }
 }
 fn relocation_type_label(inspection: &Inspection, kind: u32) -> String {
     let header = &inspection.elf.header;
     relocation_types::label(header.ident.class, header.machine, kind)
 }
-fn print_elf(path: &Path, parsed: &ElfFile, section_table: &SectionTable) {
-    let header = &parsed.header;
-    let endian = match header.ident.endianness {
+fn print_elf(path: &Path, parsed: &ElfFile, sections: &SectionTable) {
+    let h = &parsed.header;
+    let endian = match h.ident.endianness {
         Endianness::Little => "little-endian",
         Endianness::Big => "big-endian",
     };
     println!("{:?}", path);
-    println!("  Klasa:          {}", class_name(header.ident.class));
+    println!("  Klasa:          {}", class_name(h.ident.class));
     println!("  Kolejność:      {}", endian);
-    println!("  OS/ABI:         {}", header.ident.os_abi);
-    println!("  Wersja ABI:     {}", header.ident.abi_version);
-    println!("  Wersja ident.:  {}", header.ident.version);
-    println!("  Wersja ELF:     {}", header.version);
+    println!("  OS/ABI:         {}", h.ident.os_abi);
+    println!("  Wersja ABI:     {}", h.ident.abi_version);
+    println!("  Wersja ident.:  {}", h.ident.version);
+    println!("  Wersja ELF:     {}", h.version);
     println!(
         "  Typ:            {} ({})",
-        elf::file_type_name(header.file_type),
-        header.file_type
+        elf::file_type_name(h.file_type),
+        h.file_type
     );
     println!(
         "  Architektura:   {} ({})",
-        elf::machine_name(header.machine),
-        header.machine
+        elf::machine_name(h.machine),
+        h.machine
     );
-    println!("  Punkt wejścia:  {:#x}", header.entry);
-    println!("  Flagi:          {:#x}", header.flags);
-    println!("  Rozmiar nagł.:  {} B", header.header_size);
+    println!("  Punkt wejścia:  {:#x}", h.entry);
+    println!("  Flagi:          {:#x}", h.flags);
+    println!("  Rozmiar nagł.:  {} B", h.header_size);
     println!(
         "  Tabela programu: offset={:#x}, wpis={} B, licznik={}",
-        header.program_header_offset,
-        header.program_header_entry_size,
-        header_numbers::program_count(header.program_header_count, parsed.program_headers.len())
+        h.program_header_offset,
+        h.program_header_entry_size,
+        header_numbers::program_count(h.program_header_count, parsed.program_headers.len())
     );
     println!(
         "  Tabela sekcji:   offset={:#x}, wpis={} B, licznik={}",
-        header.section_header_offset,
-        header.section_header_entry_size,
-        header_numbers::section_count(header.section_header_count, section_table.headers.len())
+        h.section_header_offset,
+        h.section_header_entry_size,
+        header_numbers::section_count(h.section_header_count, sections.headers.len())
     );
     println!(
         "  Indeks nazw sekcji: {}",
         header_numbers::section_names_index(
-            header.section_names_index,
-            section_table.headers.first().map(|section| section.link)
+            h.section_names_index,
+            sections.headers.first().map(|s| s.link)
         )
     );
     println!("  Nagłówki programu:");
     if parsed.program_headers.is_empty() {
         println!("    Brak");
     }
-    for (index, segment) in parsed.program_headers.iter().enumerate() {
+    for (index, s) in parsed.program_headers.iter().enumerate() {
         println!(
             "    #{:<2} {:<14} type={:#x} {} flags={:#x}",
             index,
-            elf::segment_type_name(segment.segment_type),
-            segment.segment_type,
-            elf::segment_permissions(segment.flags),
-            segment.flags
+            elf::segment_type_name(s.segment_type),
+            s.segment_type,
+            elf::segment_permissions(s.flags),
+            s.flags
         );
         println!(
             "        offset={:#x} vaddr={:#x} paddr={:#x}",
-            segment.offset, segment.virtual_address, segment.physical_address
+            s.offset, s.virtual_address, s.physical_address
         );
         println!(
             "        filesz={:#x} memsz={:#x} align={:#x}",
-            segment.file_size, segment.memory_size, segment.alignment
+            s.file_size, s.memory_size, s.alignment
         );
     }
 }
 fn print_entry_analysis(parsed: &ElfFile) {
-    let header = &parsed.header;
+    let h = &parsed.header;
     println!("  Analiza punktu wejścia:");
-    if !matches!(header.file_type, 2 | 3) {
+    if !matches!(h.file_type, 2 | 3) {
         println!("    Pominięta dla tego typu pliku");
         return;
     }
-    if header.entry == 0 {
+    if h.entry == 0 {
         println!("    Nagłówek nie określa punktu wejścia (e_entry=0)");
         return;
     }
-    let locations = mapping::entry_locations(header.entry, &parsed.program_headers);
+    let locations = mapping::entry_locations(h.entry, &parsed.program_headers);
     if locations.is_empty() {
         println!("    Adres nie pasuje do żadnego poprawnego zakresu LOAD");
         return;
@@ -116,11 +115,11 @@ fn print_entry_analysis(parsed: &ElfFile) {
         );
     }
     for location in locations {
-        let segment = &parsed.program_headers[location.segment_index];
+        let s = &parsed.program_headers[location.segment_index];
         println!(
             "    Segment #{} LOAD {}",
             location.segment_index,
-            elf::segment_permissions(segment.flags)
+            elf::segment_permissions(s.flags)
         );
         match location.file_offset {
             Some(offset) => println!("    Offset w pliku: {:#x}", offset),
@@ -178,23 +177,23 @@ fn print_sections(table: &SectionTable) {
         println!("    Brak");
         return;
     }
-    for (index, section) in table.headers.iter().enumerate() {
+    for (index, s) in table.headers.iter().enumerate() {
         println!(
             "    #{:<2} {} {} ({:#x}) {} flags={:#x}",
             index,
             section_name(table, index),
-            sections::section_type_name(section.section_type),
-            section.section_type,
-            sections::section_flags(section.flags),
-            section.flags
+            sections::section_type_name(s.section_type),
+            s.section_type,
+            sections::section_flags(s.flags),
+            s.flags
         );
         println!(
             "        offset={:#x} addr={:#x} size={:#x}",
-            section.offset, section.address, section.size
+            s.offset, s.address, s.size
         );
         println!(
             "        link={} info={} align={:#x} entsize={:#x}",
-            section.link, section.info, section.alignment, section.entry_size
+            s.link, s.info, s.alignment, s.entry_size
         );
     }
 }
@@ -205,8 +204,8 @@ fn print_mapping(parsed: &ElfFile, table: &SectionTable) {
         return;
     }
     let mut count = 0;
-    for (index, segment) in parsed.program_headers.iter().enumerate() {
-        if !mapping::is_supported_segment(segment) {
+    for (index, s) in parsed.program_headers.iter().enumerate() {
+        if !mapping::is_supported_segment(s) {
             continue;
         }
         count += 1;
@@ -214,14 +213,14 @@ fn print_mapping(parsed: &ElfFile, table: &SectionTable) {
             .headers
             .iter()
             .enumerate()
-            .filter(|(_, section)| mapping::section_belongs_to_segment(section, segment))
+            .filter(|(_, section)| mapping::section_belongs_to_segment(section, s))
             .map(|(index, _)| format!("#{} {}", index, section_name(table, index)))
             .collect();
         println!(
             "    Segment #{} {} {}:",
             index,
-            elf::segment_type_name(segment.segment_type),
-            elf::segment_permissions(segment.flags)
+            elf::segment_type_name(s.segment_type),
+            elf::segment_permissions(s.flags)
         );
         if matches.is_empty() {
             println!("        Brak pasujących sekcji");
@@ -260,16 +259,15 @@ fn print_symbols(inspection: &Inspection) {
             println!("            Brak nazwanych wpisów");
         }
         for symbol in &table.preview {
-            let suffix = if symbol.name_truncated {
-                " [nazwa skrócona]"
-            } else {
-                ""
-            };
             println!(
                 "            #{} {:?}{}",
                 symbol.index,
                 String::from_utf8_lossy(&symbol.name),
-                suffix
+                if symbol.name_truncated {
+                    " [nazwa skrócona]"
+                } else {
+                    ""
+                }
             );
             println!(
                 "                value={:#x} size={} bind={} type={} visibility={} shndx={}",
@@ -290,12 +288,11 @@ fn print_relocations(inspection: &Inspection) {
         return;
     }
     for table in &inspection.relocations {
-        let kind = if table.with_addend { "RELA" } else { "REL" };
         println!(
             "    Sekcja #{} {}: {} wpisy={}",
             table.section_index,
             section_name(&inspection.sections, table.section_index),
-            kind,
+            if table.with_addend { "RELA" } else { "REL" },
             table.total
         );
         println!(
@@ -334,16 +331,15 @@ fn print_relocations(inspection: &Inspection) {
                     } else {
                         format!("{:?}", String::from_utf8_lossy(&symbol.name))
                     };
-                    let suffix = if symbol.name_truncated {
-                        " [nazwa skrócona]"
-                    } else {
-                        ""
-                    };
                     println!(
                         "                symbol=#{} {}{} typ_relokacji={}",
                         symbol.index,
                         name,
-                        suffix,
+                        if symbol.name_truncated {
+                            " [nazwa skrócona]"
+                        } else {
+                            ""
+                        },
                         relocation_type_label(inspection, symbol.relocation_type)
                     );
                 }
@@ -355,24 +351,24 @@ fn print_relocations(inspection: &Inspection) {
 pub(crate) fn print_inspection(path: &Path, inspection: &Inspection, mode: OutputMode) {
     match mode {
         OutputMode::Summary => {
-            let header = &inspection.elf.header;
-            let needed = match &inspection.dynamic {
-                Some(info) => info.needed.len(),
-                None => 0,
-            };
+            let h = &inspection.elf.header;
+            let needed = inspection
+                .dynamic
+                .as_ref()
+                .map_or(0, |info| info.needed.len());
             println!(
                 "{:?} | {} | {} | typ={} | sekcje={} | DT_NEEDED={}",
                 path,
-                class_name(header.ident.class),
-                elf::machine_name(header.machine),
-                header.file_type,
+                class_name(h.ident.class),
+                elf::machine_name(h.machine),
+                h.file_type,
                 inspection.sections.headers.len(),
                 needed
             );
         }
         OutputMode::Detailed => {
             print_elf(path, &inspection.elf, &inspection.sections);
-            permissions::print(&inspection.elf.program_headers);
+            permissions::print(&inspection.elf.program_headers, inspection.dynamic.as_ref());
             print_entry_analysis(&inspection.elf);
             print_interpreter(inspection.interpreter.as_deref());
             print_dynamic(inspection.dynamic.as_ref());
