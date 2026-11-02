@@ -104,6 +104,7 @@ pub(super) fn print(headers: &[ProgramHeader], dynamic: Option<&DynamicInfo>) {
                     "brak deklaracji"
                 }
             );
+            crate::search_paths::print(info);
         }
         None => println!("    Flagi dynamiczne: brak PT_DYNAMIC"),
     }

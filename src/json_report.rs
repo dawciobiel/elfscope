@@ -44,7 +44,8 @@ pub(crate) fn record(path: &Path, inspection: &Inspection) -> Value {
         "soname": optional_bytes(info.soname.as_deref()), "rpath": optional_bytes(info.rpath.as_deref()), "runpath": optional_bytes(info.runpath.as_deref()),
         "flags_hex": info.flags.map(|flags| format!("{:#x}", flags)), "flags_1_hex": info.flags_1.map(|flags| format!("{:#x}", flags)),
         "bind_now_tag": info.bind_now_tag, "textrel_tag": info.textrel_tag,
-        "bind_now_requested": info.bind_now_requested(), "pie_flag_set": info.pie_requested(), "textrel_requested": info.textrel_requested()
+        "bind_now_requested": info.bind_now_requested(), "pie_flag_set": info.pie_requested(), "textrel_requested": info.textrel_requested(),
+        "search_paths": crate::search_paths::json(info)
     }));
     json!({
         "schema_version": 1, "kind": "elf", "path": path.to_string_lossy(), "path_bytes_hex": path_hex(path),

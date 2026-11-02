@@ -10,6 +10,7 @@ mod mapping;
 mod relocations;
 mod report;
 mod scanner;
+mod search_paths;
 mod sections;
 mod selection;
 mod symbols;
