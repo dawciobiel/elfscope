@@ -11,6 +11,7 @@ mod relocations;
 mod report;
 mod scanner;
 mod sections;
+mod selection;
 mod symbols;
 use cli::Action;
 use std::env;
@@ -74,6 +75,8 @@ fn main() -> ExitCode {
         eprintln!("Błędy:                   {}", stats.errors);
         eprintln!("Wykluczone wpisy:        {}", stats.excluded);
         eprintln!("Ograniczone katalogi:    {}", stats.depth_limited);
+        eprintln!("ELF pominięte przez filtry: {}", stats.filtered);
+        eprintln!("Pliki pominięte przez rozmiar: {}", stats.size_limited);
         eprintln!(
             "Przerwano po limicie plików: {}",
             if stats.max_files_reached {

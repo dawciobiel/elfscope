@@ -1,11 +1,11 @@
 use crate::cli::ScanOptions;
+use crate::elf::ElfClass;
 use crate::relocations::RelocationLimits;
 use crate::scanner::ScanStats;
 use serde_json::{Value, json};
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
-
 fn category(kind: io::ErrorKind) -> &'static str {
     match kind {
         io::ErrorKind::NotFound => "not_found",
@@ -32,12 +32,8 @@ fn path_hex(path: &Path) -> Option<String> {
 fn path_hex(_path: &Path) -> Option<String> {
     None
 }
-
 pub(crate) fn error_record(path: &Path, error: &io::Error) -> Value {
-    json!({
-        "schema_version": 1, "kind": "error", "path": path.to_string_lossy(), "path_bytes_hex": path_hex(path),
-        "error": { "category": category(error.kind()), "message": error.to_string() }
-    })
+    json!({"schema_version": 1, "kind": "error", "path": path.to_string_lossy(), "path_bytes_hex": path_hex(path), "error": {"category": category(error.kind()), "message": error.to_string()}})
 }
 pub(crate) fn summary(
     options: &ScanOptions,
@@ -48,28 +44,26 @@ pub(crate) fn summary(
     let excluded_names: Vec<Value> = options
         .excludes
         .iter()
-        .map(|name| {
-            let path = Path::new(name);
-            json!({"text": name.to_string_lossy(), "bytes_hex": path_hex(path)})
-        })
+        .map(|name| json!({"text": name.to_string_lossy(), "bytes_hex": path_hex(Path::new(name))}))
         .collect();
+    let selected_class = options.selection.class.map(|class| match class {
+        ElfClass::Elf32 => "ELF32",
+        ElfClass::Elf64 => "ELF64",
+    });
     json!({
         "schema_version": 1, "kind": "scan_summary", "program_version": env!("CARGO_PKG_VERSION"),
         "root": options.path.to_string_lossy(), "root_bytes_hex": path_hex(&options.path),
         "status": if stats.max_files_reached { "stopped_at_file_limit" } else { "finished" },
         "had_errors": stats.errors != 0,
-        "scope_limited": options.max_depth.is_some() || !options.excludes.is_empty() || stats.max_files_reached,
+        "scope_limited": options.max_depth.is_some() || !options.excludes.is_empty() || stats.max_files_reached || options.max_size.is_some() || options.selection.is_active(),
         "elapsed_ms": elapsed.as_millis().min(u128::from(u64::MAX)) as u64,
-        "counts": {
-            "regular_files_attempted": stats.files, "elf_files": stats.elf_files, "errors": stats.errors,
-            "skipped_entries": stats.skipped, "excluded_entries": stats.excluded,
-            "depth_limited_directories": stats.depth_limited
-        },
-        "configuration": {
-            "max_depth": options.max_depth, "max_files": options.max_files,
+        "counts": {"regular_files_attempted": stats.files, "elf_files": stats.elf_files, "errors": stats.errors,
+            "skipped_entries": stats.skipped, "excluded_entries": stats.excluded, "depth_limited_directories": stats.depth_limited,
+            "filtered_elf_files": stats.filtered, "size_limited_files": stats.size_limited},
+        "configuration": {"max_depth": options.max_depth, "max_files": options.max_files, "max_size_bytes": options.max_size,
             "excluded_names": excluded_names,
-            "relocation_limits": { "tables": limits.tables, "records": limits.records, "previews": limits.previews }
-        }
+            "elf_selection": {"class": selected_class, "file_types": options.selection.file_types, "machines": options.selection.machines},
+            "relocation_limits": {"tables": limits.tables, "records": limits.records, "previews": limits.previews}}
     })
 }
 pub(crate) fn write_json(value: &Value) -> io::Result<()> {
@@ -77,7 +71,6 @@ pub(crate) fn write_json(value: &Value) -> io::Result<()> {
     bytes.push(b'\n');
     io::stdout().lock().write_all(&bytes)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

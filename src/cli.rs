@@ -1,3 +1,5 @@
+use crate::elf::ElfClass;
+use crate::selection::{self, ElfSelection};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +25,8 @@ pub struct ScanOptions {
     pub quiet: bool,
     pub json_errors: bool,
     pub json_stats: bool,
+    pub max_size: Option<u64>,
+    pub selection: ElfSelection,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
@@ -54,6 +58,10 @@ Skanowanie:
   --no-recursive      Odpowiednik --max-depth 1
   --max-files N       Maksymalna liczba sprawdzanych zwykłych plików; N > 0
   --exclude NAME      Pomijaj potomne wpisy o dokładnie tej nazwie; opcja powtarzalna
+  --max-size BYTES    Pomijaj zwykłe pliki większe od limitu; BYTES > 0
+  --elf-type TYPE     none, rel, exec, dyn, core; opcja powtarzalna (OR)
+  --class CLASS       32 lub 64
+  --machine MACHINE  i386, x86_64, arm, aarch64, riscv lub dziesiętne u16; powtarzalne (OR)
   --quiet             Nie wypisuj końcowych liczników na stderr; nie ukrywa błędów
 
 Pozostałe:
@@ -62,7 +70,8 @@ Pozostałe:
   --                 Koniec opcji; dalej ścieżka może zaczynać się od '-'
 
 Bez opcji wyjścia program pokazuje pełny raport.
-Każdy tryb wykonuje pełną zaimplementowaną analizę.
+Filtry ELF są stosowane po odczycie nagłówka, przed analizą tabel.
+Filtry różnych wymiarów są łączone przez AND. DYN obejmuje także biblioteki.
 Katalogi są przechodzone w deterministycznej kolejności po posortowaniu wpisów.
 --exclude nie obsługuje globów i nie wyklucza jawnej ścieżki startowej.
 Dowiązania symboliczne i pliki specjalne są pomijane.
@@ -91,10 +100,16 @@ fn depth(current: &mut Option<usize>, value: usize) -> Result<(), String> {
     *current = Some(value);
     Ok(())
 }
+fn positive(raw: &OsString, option: &str) -> Result<u64, String> {
+    raw.to_str()
+        .and_then(|text| text.parse::<u64>().ok())
+        .filter(|number| *number != 0)
+        .ok_or_else(|| format!("{} wymaga dodatniej liczby całkowitej", option))
+}
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, String> {
     let mut args = args.into_iter();
     let mut path = None;
-    let mut selection = None;
+    let mut output_selection = None;
     let mut options_enabled = true;
     let mut max_depth = None;
     let mut max_files = None;
@@ -103,6 +118,8 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, String>
     let mut quiet = false;
     let mut json_errors = false;
     let mut json_stats = false;
+    let mut max_size = None;
+    let mut elf_selection = ElfSelection::default();
     while let Some(arg) = args.next() {
         if options_enabled {
             if arg == "--" {
@@ -116,15 +133,15 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, String>
                 return Ok(Action::Version);
             }
             if arg == "--summary" {
-                select(&mut selection, Selection::Summary)?;
+                select(&mut output_selection, Selection::Summary)?;
                 continue;
             }
             if arg == "--json" {
-                select(&mut selection, Selection::Json)?;
+                select(&mut output_selection, Selection::Json)?;
                 continue;
             }
             if arg == "--paths" {
-                select(&mut selection, Selection::Paths)?;
+                select(&mut output_selection, Selection::Paths)?;
                 continue;
             }
             if arg == "--null" {
@@ -157,16 +174,57 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, String>
                 continue;
             }
             if arg == "--max-files" {
-                let raw = value(&mut args, "--max-files")?;
-                let number = raw
-                    .to_str()
-                    .and_then(|text| text.parse::<u64>().ok())
-                    .filter(|number| *number != 0)
-                    .ok_or_else(|| "--max-files wymaga dodatniej liczby całkowitej".to_string())?;
+                let number = positive(&value(&mut args, "--max-files")?, "--max-files")?;
                 if max_files.is_some_and(|previous| previous != number) {
                     return Err("Sprzeczne limity liczby plików".into());
                 }
                 max_files = Some(number);
+                continue;
+            }
+            if arg == "--max-size" {
+                let number = positive(&value(&mut args, "--max-size")?, "--max-size")?;
+                if max_size.is_some_and(|previous| previous != number) {
+                    return Err("Sprzeczne limity rozmiaru plików".into());
+                }
+                max_size = Some(number);
+                continue;
+            }
+            if arg == "--elf-type" {
+                let raw = value(&mut args, "--elf-type")?;
+                let number = selection::parse_file_type(
+                    raw.to_str()
+                        .ok_or_else(|| "Nieprawidłowy tekst --elf-type".to_string())?,
+                )?;
+                if !elf_selection.file_types.contains(&number) {
+                    elf_selection.file_types.push(number);
+                }
+                continue;
+            }
+            if arg == "--machine" {
+                let raw = value(&mut args, "--machine")?;
+                let number = selection::parse_machine(
+                    raw.to_str()
+                        .ok_or_else(|| "Nieprawidłowy tekst --machine".to_string())?,
+                )?;
+                if !elf_selection.machines.contains(&number) {
+                    elf_selection.machines.push(number);
+                }
+                continue;
+            }
+            if arg == "--class" {
+                let raw = value(&mut args, "--class")?;
+                let class = match raw.to_str() {
+                    Some("32") => ElfClass::Elf32,
+                    Some("64") => ElfClass::Elf64,
+                    _ => return Err("--class wymaga 32 lub 64".into()),
+                };
+                if elf_selection
+                    .class
+                    .is_some_and(|previous| previous != class)
+                {
+                    return Err("Sprzeczne filtry --class".into());
+                }
+                elf_selection.class = Some(class);
                 continue;
             }
             if arg == "--exclude" {
@@ -193,7 +251,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, String>
         path = Some(PathBuf::from(arg));
     }
     let path = path.ok_or_else(|| "Brak ścieżki do pliku lub katalogu".to_string())?;
-    let (mode, format) = match selection {
+    let (mode, format) = match output_selection {
         None => (OutputMode::Detailed, OutputFormat::Text),
         Some(Selection::Summary) => (OutputMode::Summary, OutputFormat::Text),
         Some(Selection::Json) => (OutputMode::Detailed, OutputFormat::JsonLines),
@@ -216,6 +274,8 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, String>
         quiet,
         json_errors,
         json_stats,
+        max_size,
+        selection: elf_selection,
     }))
 }
 #[cfg(test)]
@@ -338,5 +398,45 @@ mod tests {
         for flag in ["--json-errors", "--json-stats"] {
             assert!(parse(args(&[flag, "example"])).is_err());
         }
+    }
+    #[test]
+    fn combines_repeated_type_filters() {
+        assert_eq!(
+            scan(&["--elf-type", "exec", "--elf-type", "dyn", "example"])
+                .selection
+                .file_types,
+            vec![2, 3]
+        );
+    }
+    #[test]
+    fn reads_machine_filters() {
+        assert_eq!(
+            scan(&["--machine", "x86_64", "--machine", "183", "example"])
+                .selection
+                .machines,
+            vec![62, 183]
+        );
+    }
+    #[test]
+    fn validates_class_filters() {
+        assert_eq!(
+            scan(&["--class", "32", "example"]).selection.class,
+            Some(ElfClass::Elf32)
+        );
+        assert!(parse(args(&["--class", "16", "example"])).is_err());
+        assert!(parse(args(&["--class", "32", "--class", "64", "example"])).is_err());
+    }
+    #[test]
+    fn validates_max_size() {
+        assert_eq!(
+            scan(&["--max-size", "1024", "example"]).max_size,
+            Some(1024)
+        );
+        assert!(parse(args(&["--max-size", "0", "example"])).is_err());
+    }
+    #[test]
+    fn rejects_invalid_filter_values() {
+        assert!(parse(args(&["--elf-type", "bad", "example"])).is_err());
+        assert!(parse(args(&["--machine", "bad", "example"])).is_err());
     }
 }

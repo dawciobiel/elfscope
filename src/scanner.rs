@@ -1,4 +1,5 @@
 use crate::cli::{OutputFormat, ScanOptions};
+use crate::inspection::InspectionOutcome;
 use crate::relocations::RelocationLimits;
 use crate::{diagnostics, inspection, json_report, report};
 use std::fs;
@@ -13,6 +14,8 @@ pub(crate) struct ScanStats {
     pub excluded: u64,
     pub depth_limited: u64,
     pub max_files_reached: bool,
+    pub filtered: u64,
+    pub size_limited: u64,
 }
 fn error(
     path: &Path,
@@ -38,6 +41,9 @@ fn excluded(options: &ScanOptions, path: &Path, depth: usize) -> bool {
 }
 fn depth_limited(options: &ScanOptions, depth: usize) -> bool {
     options.max_depth.is_some_and(|limit| depth >= limit)
+}
+fn size_limited(options: &ScanOptions, size: u64) -> bool {
+    options.max_size.is_some_and(|limit| size > limit)
 }
 #[cfg(unix)]
 fn path_bytes(path: &Path) -> Vec<u8> {
@@ -120,12 +126,17 @@ pub(crate) fn scan(options: &ScanOptions, limits: &RelocationLimits) -> io::Resu
             break;
         }
         stats.files += 1;
-        match inspection::inspect_file(&path, limits) {
-            Ok(Some(inspection)) => {
+        if size_limited(options, metadata.len()) {
+            stats.size_limited += 1;
+            continue;
+        }
+        match inspection::inspect_file(&path, limits, &options.selection) {
+            Ok(InspectionOutcome::Parsed(inspection)) => {
                 stats.elf_files += 1;
                 output(options, &path, &inspection)?;
             }
-            Ok(None) => {}
+            Ok(InspectionOutcome::Filtered) => stats.filtered += 1,
+            Ok(InspectionOutcome::NotElf) => {}
             Err(cause) => error(&path, &cause, &mut stats, options)?,
         }
     }
@@ -158,5 +169,12 @@ mod tests {
         options.max_depth = Some(1);
         assert!(!depth_limited(&options, 0));
         assert!(depth_limited(&options, 1));
+    }
+    #[test]
+    fn size_limit_is_inclusive() {
+        let mut options = options();
+        options.max_size = Some(64);
+        assert!(!size_limited(&options, 64));
+        assert!(size_limited(&options, 65));
     }
 }
